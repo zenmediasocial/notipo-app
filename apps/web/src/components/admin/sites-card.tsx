@@ -34,6 +34,7 @@ export function SitesCard({
   const [siteUrl, setSiteUrl] = useState("");
   const [username, setUsername] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [showManual, setShowManual] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -46,6 +47,35 @@ export function SitesCard({
     const plain = trimmed.match(/([0-9a-f]{32})/i);
     const found = dashed?.[1] ?? plain?.[1] ?? trimmed;
     return found.replace(/-/g, "");
+  }
+
+  // One-click: WordPress itself issues the application password on its own
+  // approve screen, then redirects back with user_login/password in the query
+  // (captured by WPAuthHandler on this page). No credential typing in Notipo.
+  function startOneClick(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    let parsed: URL;
+    try { parsed = new URL(siteUrl.replace(/\/+$/, "")); } catch { return; }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    sessionStorage.setItem(
+      "pendingSiteConnect",
+      JSON.stringify({
+        name,
+        notionRootPageId: parseNotionPageId(rootPage),
+        siteUrl: parsed.origin,
+      }),
+    );
+    const callbackUrl = `${window.location.origin}/admin/blogs`;
+    window.location.href = `${parsed.origin}/wp-admin/authorize-application.php?app_name=Notipo&success_url=${encodeURIComponent(callbackUrl)}`;
+  }
+
+  function submit(e: React.FormEvent) {
+    if (!showManual) {
+      startOneClick(e);
+      return;
+    }
+    void connect(e);
   }
 
   async function connect(e: React.FormEvent) {
@@ -166,7 +196,7 @@ export function SitesCard({
         ))}
 
         {adding && (
-          <form onSubmit={connect} className="space-y-3 border rounded-md p-3">
+          <form onSubmit={submit} className="space-y-3 border rounded-md p-3">
             <div className="space-y-1">
               <Label htmlFor="site-name">Blog name</Label>
               <Input id="site-name" value={name} onChange={(e) => setName(e.target.value)} required placeholder="Crown Trophy" />
@@ -182,17 +212,26 @@ export function SitesCard({
               <Label htmlFor="site-url">WordPress site URL</Label>
               <Input id="site-url" type="url" value={siteUrl} onChange={(e) => setSiteUrl(e.target.value)} required placeholder="https://yourblog.com" />
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="site-user">WordPress username</Label>
-              <Input id="site-user" value={username} onChange={(e) => setUsername(e.target.value)} required />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="site-pass">WordPress application password</Label>
-              <Input id="site-pass" type="password" value={appPassword} onChange={(e) => setAppPassword(e.target.value)} required />
-            </div>
+            {showManual && (
+              <>
+                <div className="space-y-1">
+                  <Label htmlFor="site-user">WordPress username</Label>
+                  <Input id="site-user" value={username} onChange={(e) => setUsername(e.target.value)} required />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="site-pass">WordPress application password</Label>
+                  <Input id="site-pass" type="password" value={appPassword} onChange={(e) => setAppPassword(e.target.value)} required />
+                </div>
+              </>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex gap-2">
-              <Button type="submit" size="sm" disabled={saving}>{saving ? "Connecting..." : "Connect blog"}</Button>
+              <Button type="submit" size="sm" disabled={saving}>
+                {showManual ? (saving ? "Connecting..." : "Connect blog") : "Approve in WordPress"}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setShowManual(!showManual)}>
+                {showManual ? "Use WordPress approval instead" : "Use application password instead"}
+              </Button>
               <Button type="button" variant="ghost" size="sm" onClick={() => { setAdding(false); setError(null); }}>Cancel</Button>
             </div>
           </form>
