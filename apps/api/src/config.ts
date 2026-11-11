@@ -14,6 +14,10 @@ const emptyToUndefinedEmail = z.preprocess(
   (v) => (v === "" ? undefined : v),
   z.string().email().optional(),
 );
+const emptyToUndefinedNumber = z.preprocess(
+  (v) => (v === "" ? undefined : v),
+  z.coerce.number().optional(),
+);
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -50,12 +54,36 @@ const envSchema = z.object({
   STRIPE_PRO_PRICE_ID: emptyToUndefined,
   RESEND_API_KEY: emptyToUndefined,
   RESEND_FROM_EMAIL: emptyToUndefined,
+  EMAIL_PROVIDER: emptyToUndefined,
+  EMAIL_FROM: emptyToUndefinedEmail,
+  SMTP_HOST: emptyToUndefined,
+  SMTP_PORT: emptyToUndefinedNumber,
+  SMTP_SECURE: z.string().default("false").transform((v) => v === "true"),
+  SMTP_IGNORE_TLS: z.string().default("false").transform((v) => v === "true"),
+  SMTP_USER: emptyToUndefined,
+  SMTP_PASSWORD: emptyToUndefined,
   ADMIN_NOTIFY_EMAIL: emptyToUndefinedEmail,
   SUPPORT_EMAIL: emptyToUndefinedEmail,
   FRONTEND_URL: emptyToUndefinedUrl,
   BRAND_NAME: emptyToUndefined,
   UNSPLASH_ACCESS_KEY: emptyToUndefined,
+  PIXABAY_API_KEY: emptyToUndefined,
+  PEXELS_API_KEY: emptyToUndefined,
+  GIPHY_API_KEY: emptyToUndefined,
+  STOCK_IMAGE_PROVIDER: emptyToUndefined,
+  AI_IMAGE_PROVIDER: emptyToUndefined,
   GEMINI_API_KEY: emptyToUndefined,
+  GEMINI_IMAGE_MODEL: emptyToUndefined,
+  GEMINI_BASE_URL: emptyToUndefinedUrl,
+  OPENROUTER_API_KEY: emptyToUndefined,
+  OPENROUTER_IMAGE_MODEL: emptyToUndefined,
+  OPENROUTER_BASE_URL: emptyToUndefinedUrl,
+  FAL_KEY: emptyToUndefined,
+  FAL_IMAGE_MODEL: emptyToUndefined,
+  FAL_BASE_URL: emptyToUndefinedUrl,
+  MUAPI_API_KEY: emptyToUndefined,
+  MUAPI_IMAGE_MODEL: emptyToUndefined,
+  MUAPI_BASE_URL: emptyToUndefinedUrl,
   SENTRY_DSN: emptyToUndefinedUrl,
 });
 

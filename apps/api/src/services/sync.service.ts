@@ -13,7 +13,8 @@ import { convertMarkdownToGutenberg } from "./markdown-to-gutenberg.js";
 import { FeaturedImageService } from "./featured-image.service.js";
 import { canGenerateFeaturedImage } from "../lib/plan-limits.js";
 import { extractImageRefs } from "../lib/extract-images.js";
-import { resolveGeminiApiKey } from "../lib/gemini-key.js";
+import { resolveAiImageProvider } from "../lib/ai-image-provider.js";
+import { buildStockAttributionBlock } from "../lib/stock-attribution.js";
 import { logger } from "../lib/logger.js";
 
 export interface DirectPublishInput {
@@ -287,12 +288,12 @@ export class SyncService {
         const imgService = new FeaturedImageService();
         const slug = result.metadata.slug || result.metadata.title;
         const safeSlug = slug.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 60);
-        const { buffer: imageBuffer, unsplashAttribution } = await imgService.generate({
+        const { buffer: imageBuffer, stockAttribution } = await imgService.generate({
           title: result.metadata.featuredImageTitle,
           category: category?.name || result.metadata.category || "Blog",
           backgroundImageUrl: category?.backgroundImage || undefined,
           mode: tenant!.featuredImageMode,
-          geminiApiKey: (await resolveGeminiApiKey(this.prisma, tenantId)) ?? undefined,
+          aiImageProvider: (await resolveAiImageProvider(this.prisma, tenantId)) ?? undefined,
           aiImageStyle: tenant!.aiImageStyle ?? undefined,
           tags: result.metadata.tags,
         });
@@ -304,9 +305,8 @@ export class SyncService {
         wpFeaturedMediaId = media.id;
         logger.info({ wpFeaturedMediaId }, "Featured image uploaded to WP");
 
-        if (unsplashAttribution) {
-          const { photographerName, photographerUrl } = unsplashAttribution;
-          wpContent += `\n\n<!-- wp:paragraph {"className":"unsplash-credit","style":{"typography":{"fontSize":"14px"}}} -->\n<p class="unsplash-credit" style="font-size:14px">Photo by <a href="${photographerUrl}?utm_source=notipo&amp;utm_medium=referral">${photographerName}</a> on <a href="https://unsplash.com?utm_source=notipo&amp;utm_medium=referral">Unsplash</a></p>\n<!-- /wp:paragraph -->`;
+        if (stockAttribution) {
+          wpContent += buildStockAttributionBlock(stockAttribution);
         }
       }
 
@@ -461,12 +461,12 @@ export class SyncService {
       onStep?.("Generating featured image…");
       const imgService = new FeaturedImageService();
       const safeSlug = (slug || input.title).toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 60);
-      const { buffer: imageBuffer, unsplashAttribution } = await imgService.generate({
+      const { buffer: imageBuffer, stockAttribution } = await imgService.generate({
         title: featuredImageTitle,
         category: category?.name || input.category || "Blog",
         backgroundImageUrl: category?.backgroundImage || undefined,
         mode: tenant!.featuredImageMode,
-        geminiApiKey: (await resolveGeminiApiKey(this.prisma, tenantId)) ?? undefined,
+        aiImageProvider: (await resolveAiImageProvider(this.prisma, tenantId)) ?? undefined,
         aiImageStyle: tenant!.aiImageStyle ?? undefined,
         tags: input.tags,
       });
@@ -477,9 +477,8 @@ export class SyncService {
       });
       wpFeaturedMediaId = media.id;
 
-      if (unsplashAttribution) {
-        const { photographerName, photographerUrl } = unsplashAttribution;
-        wpContent += `\n\n<!-- wp:paragraph {"className":"unsplash-credit","style":{"typography":{"fontSize":"14px"}}} -->\n<p class="unsplash-credit" style="font-size:14px">Photo by <a href="${photographerUrl}?utm_source=notipo&amp;utm_medium=referral">${photographerName}</a> on <a href="https://unsplash.com?utm_source=notipo&amp;utm_medium=referral">Unsplash</a></p>\n<!-- /wp:paragraph -->`;
+      if (stockAttribution) {
+        wpContent += buildStockAttributionBlock(stockAttribution);
       }
     }
 

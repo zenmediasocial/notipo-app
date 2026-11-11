@@ -4,7 +4,7 @@
 
 **Open-source WordPress publishing for AI agents — MCP server, REST API, and CLI. Or sync from Notion.**
 
-Point your agent (Claude, Cursor, ChatGPT, n8n, any HTTP client) at Notipo and it publishes to your self-hosted WordPress — no plugin required. Notipo handles the full pipeline: markdown → Gutenberg conversion, image hosting in your WordPress media library, AI- or Unsplash-generated featured images, and Rank Math / Yoast / SEOPress / AIOSEO metadata applied automatically on publish.
+Point your agent (Claude, Cursor, ChatGPT, n8n, any HTTP client) at Notipo and it publishes to your self-hosted WordPress — no plugin required. Notipo handles the full pipeline: markdown → Gutenberg conversion, image hosting in your WordPress media library, AI- or stock-provider-generated featured images, and Rank Math / Yoast / SEOPress / AIOSEO metadata applied automatically on publish.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![npm: notipo CLI](https://img.shields.io/npm/v/notipo.svg?label=npm%20cli)](https://www.npmjs.com/package/notipo)
@@ -65,8 +65,8 @@ Self-hosting is unsupported — no help beyond what's in this repo, no upgrade p
 - **Backend:** Fastify, TypeScript, Prisma, PostgreSQL 17
 - **Job queue:** [pg-boss](https://github.com/timgit/pg-boss) (Postgres-backed, no Redis)
 - **Frontend (admin):** Next.js 16 + shadcn/ui + Tailwind
-- **AI:** Google Gemini (featured images), [Model Context Protocol](https://modelcontextprotocol.io) (agent integration)
-- **Other:** Sharp (images), Stripe (billing), Resend (transactional email), Sentry (errors), PostHog (product analytics), Notion SDK, WordPress REST API
+- **AI:** Provider-agnostic featured images (Gemini, OpenRouter, Fal.ai, MUAPI), [Model Context Protocol](https://modelcontextprotocol.io) (agent integration)
+- **Other:** Sharp (images), Unsplash/Pixabay/Pexels/GIPHY (stock images), Stripe (billing), SMTP or Resend (transactional email), Sentry (errors), PostHog (product analytics), Notion SDK, WordPress REST API
 - **CLI:** zero-dependency npm package, native fetch only
 
 Monorepo (Turborepo + npm workspaces):

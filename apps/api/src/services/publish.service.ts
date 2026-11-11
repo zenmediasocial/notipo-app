@@ -13,6 +13,8 @@ import { FeaturedImageService } from "./featured-image.service.js";
 import { CredentialService } from "./credential.service.js";
 import { NotionService } from "./notion.service.js";
 import { convertMarkdownToGutenberg } from "./markdown-to-gutenberg.js";
+import { resolveAiImageProvider } from "../lib/ai-image-provider.js";
+import { buildStockAttributionBlock } from "../lib/stock-attribution.js";
 import { logger } from "../lib/logger.js";
 
 export class PublishService {
@@ -135,10 +137,14 @@ export class PublishService {
       if (!wpFeaturedMediaId && post.featuredImageTitle) {
         onStep?.("Generating featured image…");
         const imgService = new FeaturedImageService();
-        const { buffer: imageBuffer, unsplashAttribution } = await imgService.generate({
+        const { buffer: imageBuffer, stockAttribution } = await imgService.generate({
           title: post.featuredImageTitle,
           category: post.category?.name || "Blog",
           backgroundImageUrl: post.category?.backgroundImage || undefined,
+          mode: post.tenant.featuredImageMode,
+          aiImageProvider: (await resolveAiImageProvider(this.prisma, tenantId)) ?? undefined,
+          aiImageStyle: post.tenant.aiImageStyle ?? undefined,
+          tags: post.tags,
         });
         const slug = post.slug || post.title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         const media = await wp.uploadMedia(imageBuffer, `${slug}-featured.png`);
@@ -148,9 +154,8 @@ export class PublishService {
         });
         wpFeaturedMediaId = media.id;
 
-        if (unsplashAttribution) {
-          const { photographerName, photographerUrl } = unsplashAttribution;
-          wpContent += `\n\n<!-- wp:paragraph {"className":"unsplash-credit","style":{"typography":{"fontSize":"14px"}}} -->\n<p class="unsplash-credit" style="font-size:14px">Photo by <a href="${photographerUrl}?utm_source=notipo&amp;utm_medium=referral">${photographerName}</a> on <a href="https://unsplash.com?utm_source=notipo&amp;utm_medium=referral">Unsplash</a></p>\n<!-- /wp:paragraph -->`;
+        if (stockAttribution) {
+          wpContent += buildStockAttributionBlock(stockAttribution);
         }
       }
 

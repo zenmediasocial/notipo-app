@@ -36,7 +36,7 @@ Out of scope:
 - Vulnerabilities in dependencies (please report to the upstream project; we'll patch when they release)
 - Issues caused by misconfiguration in self-hosted deployments (e.g., exposing the database to the internet)
 - Self-hosted instances that have been modified beyond the published code
-- Third-party services Notipo integrates with (Notion, WordPress, Stripe, Resend, Gemini) — report directly to those vendors
+- Third-party services Notipo integrates with (Notion, WordPress, Stripe, SMTP providers, Resend, Gemini, OpenRouter, Fal.ai, MUAPI, Unsplash, Pixabay, Pexels, GIPHY) — report directly to those vendors
 
 ## What counts as a vulnerability
 

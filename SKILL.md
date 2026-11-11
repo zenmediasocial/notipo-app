@@ -89,7 +89,7 @@ notipo posts create \
 
 The `--wait` flag polls until the job completes and returns the result with the WordPress URL.
 
-### Create with inline Unsplash images (Pro plan, curl only)
+### Create with inline stock images (Pro plan, curl only)
 
 ```bash
 curl -X POST $NOTIPO_URL/api/posts/create \
@@ -268,15 +268,15 @@ For curl/HTTP usage, `POST /api/posts/create` accepts:
 | **imageTitle** | string | No | Text overlay on featured image (Pro) |
 | **slug** | string | No | Custom URL slug |
 | **publish** | boolean | No | Publish immediately (default: false) |
-| **images** | object[] | No | Inline Unsplash images (Pro). Each: `{query, afterHeading}` |
+| **images** | object[] | No | Inline stock images (Pro). Each: `{query, afterHeading}` |
 
 ## What Notipo Handles
 
 - Notion page creation from markdown (no Notion credentials needed)
 - Markdown → Notion blocks → WordPress Gutenberg block conversion
 - Image download from Notion and upload to WordPress media library
-- Featured image generation (1200×628 with category background + title overlay)
-- Inline Unsplash image insertion by search query (Pro plan)
+- Featured image generation (1200×628 with category background, stock providers, or AI providers)
+- Inline stock image insertion by search query (Pro plan)
 - SEO metadata — Rank Math, Yoast, SEOPress, AIOSEO
 - Post status management in Notion
 - Failure notifications via Slack/Discord webhook

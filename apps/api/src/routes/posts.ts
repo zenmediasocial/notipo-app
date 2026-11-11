@@ -1,11 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import axios from "axios";
 import { WordPressService } from "../services/wordpress.service.js";
 import { CredentialService } from "../services/credential.service.js";
 import { NotionService } from "../services/notion.service.js";
+import { searchStockImage } from "../services/stock-image-providers/index.js";
 import { logger } from "../lib/logger.js";
-import { config } from "../config.js";
 import { canGenerateFeaturedImage } from "../lib/plan-limits.js";
 import { captureServer } from "../lib/posthog-server.js";
 
@@ -191,9 +190,9 @@ export async function postRoutes(app: FastifyInstance) {
       ? (tenant.notionPublishTriggerStatus ?? "Publish")
       : (tenant.notionTriggerStatus ?? "Post to Wordpress");
 
-    // Insert Unsplash images into body (Pro plan only)
+    // Insert stock images into body (Pro plan only)
     let enrichedBody = body.body;
-    if (body.images?.length && enrichedBody && config.UNSPLASH_ACCESS_KEY) {
+    if (body.images?.length && enrichedBody) {
       const tenantPlan = await app.prisma.tenant.findUniqueOrThrow({
         where: { id: tenantId },
         select: { plan: true, trialEndsAt: true },
@@ -201,22 +200,10 @@ export async function postRoutes(app: FastifyInstance) {
       if (canGenerateFeaturedImage(tenantPlan.plan, tenantPlan.trialEndsAt)) {
         for (const img of body.images) {
           try {
-            const search = await axios.get<{
-              results: Array<{ urls: { regular: string }; alt_description: string | null; links: { download_location: string } }>;
-            }>("https://api.unsplash.com/search/photos", {
-              params: { query: img.query, orientation: "landscape", per_page: 5 },
-              headers: { Authorization: `Client-ID ${config.UNSPLASH_ACCESS_KEY}` },
-              timeout: 10_000,
-            });
-            const photo = search.data.results[0];
-            if (photo) {
-              // Trigger download tracking (Unsplash ToS)
-              axios.get(photo.links.download_location, {
-                headers: { Authorization: `Client-ID ${config.UNSPLASH_ACCESS_KEY}` },
-                timeout: 5_000,
-              }).catch(() => {});
-              const alt = photo.alt_description || img.query;
-              const imageMarkdown = `\n\n![${alt}](${photo.urls.regular})`;
+            const image = await searchStockImage(img.query);
+            if (image) {
+              const alt = img.query;
+              const imageMarkdown = `\n\n![${alt}](${image.url})`;
               // Insert after the matching heading
               const headingIndex = enrichedBody!.indexOf(img.afterHeading);
               if (headingIndex !== -1) {
@@ -226,7 +213,7 @@ export async function postRoutes(app: FastifyInstance) {
               }
             }
           } catch (err) {
-            logger.warn({ err, query: img.query }, "Unsplash search failed for inline image");
+            logger.warn({ err, query: img.query }, "Stock image search failed for inline image");
           }
         }
       }

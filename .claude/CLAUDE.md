@@ -293,13 +293,13 @@ Per-tenant Notion poll logic, shared by the poll-notion job and `POST /api/sync-
 
 ### `featured-image.service.ts`
 Generates 1200x628 PNG featured images. Two modes controlled by tenant `featuredImageMode`:
-- **STANDARD** (default): sharp-based compositing (no text overlay). Background priority: an HTTPS URL, a bundled default (`public/category-images/`, empty by default), Unsplash, gradient fallback. An uploaded background is stored in the tenant's own WordPress media library and read back as an ordinary HTTPS URL, so it takes the first branch. Unsplash searches by category name (30 results cached in-memory), picks photo deterministically by hashing post title. Returns `FeaturedImageResult` with optional `UnsplashAttribution`. Requires `UNSPLASH_ACCESS_KEY`; falls back to gradient without it.
-- **AI_GENERATED**: Delegates to `gemini-image.service.ts` which calls the Gemini REST API to generate an illustration from the post title, category, tags, and tenant's `aiImageStyle` (e.g. "comic book", "watercolor"). The key is per tenant, encrypted in `tenant.geminiCredentials` and set at `PUT /api/settings/gemini` — Gemini sells prepaid accounts only, so generation is billed to whoever owns the key. `GEMINI_API_KEY` is used **only when self-hosted**, where the operator and the tenant are the same person; the hosted service has no shared fallback. `lib/gemini-key.ts` holds that rule, and `PATCH /api/settings` refuses `AI_GENERATED` when no key resolves. Output is resized to 1200x628 via sharp.
+- **STANDARD** (default): sharp-based compositing (no text overlay). Background priority: an HTTPS URL, a bundled default (`public/category-images/`, empty by default), configured stock image providers, then gradient fallback. Stock providers are selected from Unsplash, Pixabay, Pexels, and GIPHY by `STOCK_IMAGE_PROVIDER`, with fallback across whichever providers have keys. Search results are cached in memory per provider/category and the chosen image is selected deterministically by hashing post title. Returns `FeaturedImageResult` with optional generic `stockAttribution`.
+- **AI_GENERATED**: Delegates to the configured provider from `services/image-providers/` using the shared prompt/style presets in `ai-image-prompt.ts`. The provider config is per tenant, encrypted in `tenant.aiImageProvider` as `{provider, model, apiKey, baseUrl}` and set at `PUT /api/settings/ai-image` — generation is billed to whoever owns the key. Self-hosted instances can set an instance fallback via `AI_IMAGE_PROVIDER` plus that provider's env key/model/base URL; the hosted service has no shared fallback. `lib/ai-image-provider.ts` holds that rule, and `PATCH /api/settings` refuses `AI_GENERATED` when no provider resolves. Provider output is resized to 1200x628 via sharp in this dispatcher.
 
-Photographer attribution (Unsplash only) is appended as a Gutenberg paragraph block in sync/publish services.
+Stock image attribution is appended as a Gutenberg paragraph block in sync/publish services.
 
-### `gemini-image.service.ts`
-Calls Google Gemini API (`gemini-2.5-flash-image`, free tier) to generate blog featured images. Builds a prompt from post title, category, tags, and style. Returns 1200x628 PNG buffer. No text is included in the generated image.
+### `services/image-providers/`
+AI image provider adapters behind the shared `ImageProvider` interface. Gemini, OpenRouter, Fal.ai, and MUAPI return raw image bytes; `featured-image.service.ts` owns the final sharp crop to 1200x628 so every provider emits the same PNG dimensions.
 
 ### Inline Unsplash Images (POST /api/posts/create)
 The `images` field accepts an array of `{ query, afterHeading }` objects. On Pro plan, the route searches Unsplash for each query and inserts `![alt](url)` into the markdown body after the matching heading before creating the Notion page. Gated by `canGenerateFeaturedImage()` (same as featured images). Falls back silently if Unsplash search fails.
@@ -334,7 +334,7 @@ FAQ blocks in markdown-to-gutenberg also use `wpSeoPlugin` to output the correct
 
 ### Email Notifications
 
-Transactional emails via Resend (`src/lib/email.ts`):
+Transactional emails via `src/lib/email.ts` support SMTP (default for self-hosted) or Resend (`EMAIL_PROVIDER=resend`):
 - **Verification email**: Sent on registration, contains verification link
 - **Welcome email**: Sent after email verification, includes setup steps and feature overview
 - **Onboarding reminder**: Background job (`send-onboarding-email.job.ts`) sends reminder if setup incomplete
@@ -384,13 +384,22 @@ DATABASE_URL=
 ENCRYPTION_KEY=            # 64-char hex: openssl rand -hex 32
 API_KEY=                   # Admin API key
 ALLOW_SIGNUP=true
-RESEND_API_KEY=            # For email verification + password reset
-RESEND_FROM_EMAIL=noreply@notipo.com
+EMAIL_PROVIDER=smtp        # SMTP by default; use EMAIL_PROVIDER=resend for Resend
+EMAIL_FROM=                # From address for verification/reset email
+SMTP_HOST=                 # host.containers.internal for the host Postfix→SendGrid relay
+SMTP_PORT=25
+SMTP_SECURE=false
+SMTP_IGNORE_TLS=true
+RESEND_API_KEY=            # Optional: only when EMAIL_PROVIDER=resend
+RESEND_FROM_EMAIL=         # Legacy alias for EMAIL_FROM
 ADMIN_NOTIFY_EMAIL=        # Optional: receive email when new users sign up
 NEXT_PUBLIC_POSTHOG_KEY=   # Optional: PostHog analytics (marketing site + admin UI)
 NEXT_PUBLIC_META_PIXEL_ID= # Optional: Meta Pixel tracking (CompleteRegistration on signup)
-GEMINI_API_KEY=            # Optional, self-hosted only: AI-generated featured images.
-                           # Hosted blogs supply their own key in Settings instead.
+AI_IMAGE_PROVIDER=         # Optional, self-hosted only: GEMINI, OPENROUTER, FAL, or MUAPI
+GEMINI_API_KEY=            # Optional self-hosted fallback for the selected provider.
+OPENROUTER_API_KEY=        # Hosted blogs supply their own provider config in Settings instead.
+FAL_KEY=
+MUAPI_API_KEY=
 ```
 
 ## Deployment

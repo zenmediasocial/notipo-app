@@ -11,8 +11,11 @@ export interface NotionCredentials {
   workspaceId?: string;
 }
 
-export interface GeminiCredentials {
+export interface AiImageProviderCredentials {
+  provider?: string;
+  model?: string;
   apiKey: string;
+  baseUrl?: string;
 }
 
 export interface WordPressCredentials {
@@ -58,23 +61,23 @@ export class CredentialService {
     return decryptJson<WordPressCredentials>(tenant.wordpressCredentials);
   }
 
-  async setGeminiCredentials(tenantId: string, creds: GeminiCredentials) {
+  async setAiImageProvider(tenantId: string, creds: AiImageProviderCredentials) {
     await this.prisma.tenant.update({
       where: { id: tenantId },
-      data: { geminiCredentials: encryptJson(creds as unknown as Record<string, unknown>) },
+      data: { aiImageProvider: encryptJson(creds as unknown as Record<string, unknown>) },
     });
   }
 
-  async getGeminiCredentials(tenantId: string): Promise<GeminiCredentials | null> {
+  async getAiImageProvider(tenantId: string): Promise<AiImageProviderCredentials | null> {
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
-    if (!tenant?.geminiCredentials) return null;
-    return decryptJson<GeminiCredentials>(tenant.geminiCredentials);
+    if (!tenant?.aiImageProvider) return null;
+    return decryptJson<AiImageProviderCredentials>(tenant.aiImageProvider);
   }
 
-  async clearGeminiCredentials(tenantId: string) {
+  async clearAiImageProvider(tenantId: string) {
     await this.prisma.tenant.update({
       where: { id: tenantId },
-      data: { geminiCredentials: null },
+      data: { aiImageProvider: null },
     });
   }
 }

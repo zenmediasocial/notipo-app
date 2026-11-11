@@ -1,7 +1,8 @@
 /**
  * Featured image generator.
  * Uses sharp for background resize/crop. Background sources: uploaded image,
- * Unsplash search, or gradient fallback. AI mode delegates to Gemini.
+ * stock image providers, or gradient fallback. AI mode delegates to the
+ * configured image provider, then sharp normalizes every result to 1200x628.
  */
 
 import sharp from "sharp";
@@ -9,10 +10,15 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import axios from "axios";
 import { isPrivateUrl } from "../lib/url-validation.js";
-import { config } from "../config.js";
 import { logger } from "../lib/logger.js";
-import { GeminiImageService } from "./gemini-image.service.js";
-import type { FeaturedImageRequest, FeaturedImageResult, UnsplashAttribution } from "../types/index.js";
+import { createImageProvider } from "./image-providers/index.js";
+import { fetchRemoteImage } from "./image-providers/http.js";
+import { getConfiguredStockImageProviders } from "./stock-image-providers/index.js";
+import type { StockImageAttribution, StockImageCandidate } from "./stock-image-providers/types.js";
+import type {
+  FeaturedImageRequest,
+  FeaturedImageResult,
+} from "../types/index.js";
 
 const WIDTH = 1200;
 const HEIGHT = 628;
@@ -30,101 +36,65 @@ const GRADIENTS: [string, string][] = [
   ["#2c3e50", "#3498db"], // dark → bright blue
 ];
 
-// In-memory cache for Unsplash search results (metadata only, not image bytes).
-interface UnsplashSearchResult {
-  id: string;
-  url: string;
-  downloadLocation: string;
-  photographerName: string;
-  photographerUrl: string;
-}
-const unsplashSearchCache = new Map<string, UnsplashSearchResult[]>();
+// In-memory cache for stock search results (metadata only, not image bytes).
+const stockSearchCache = new Map<string, StockImageCandidate[]>();
 
-/** Simple string hash for deterministic photo selection. */
+/** Simple string hash for deterministic image selection. */
 function hashString(str: string): number {
   let hash = 0;
   for (const ch of str) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
   return Math.abs(hash);
 }
 
-interface UnsplashResult {
+interface StockImageResult {
   buffer: Buffer;
-  attribution: UnsplashAttribution;
+  attribution: StockImageAttribution;
 }
 
 export class FeaturedImageService {
   /**
-   * Fetch a landscape photo from Unsplash for a category.
-   * Searches by category name (cached), picks a photo by hashing the post title
-   * so each post gets a different but deterministic background.
-   * Only downloads the selected photo (not all results).
+   * Fetch a landscape stock image for a category. Providers are tried in
+   * configured order; results are cached per provider/category and the chosen
+   * image is selected deterministically by post title.
    */
-  private async fetchUnsplashBackground(category: string, title: string): Promise<UnsplashResult | null> {
-    if (!config.UNSPLASH_ACCESS_KEY) return null;
+  private async fetchStockBackground(category: string, title: string): Promise<StockImageResult | null> {
+    const providers = getConfiguredStockImageProviders();
+    if (providers.length === 0) return null;
 
-    let results = unsplashSearchCache.get(category);
+    for (const provider of providers) {
+      const cacheKey = `${provider.name}:${category}`;
+      let candidates = stockSearchCache.get(cacheKey);
 
-    if (!results) {
+      if (!candidates) {
+        try {
+          candidates = await provider.search(category);
+          stockSearchCache.set(cacheKey, candidates);
+          logger.info({ provider: provider.name, category, count: candidates.length }, "Cached stock image search results for category");
+        } catch (err) {
+          logger.warn({ err, provider: provider.name, category }, "Stock image search failed — trying next provider");
+          continue;
+        }
+      }
+
+      if (candidates.length === 0) continue;
+
+      const index = hashString(title) % candidates.length;
+      const candidate = candidates[index];
+
       try {
-        const search = await axios.get<{
-          results: Array<{
-            id: string;
-            urls: { regular: string };
-            links: { download_location: string };
-            user: { name: string; links: { html: string } };
-          }>;
-        }>("https://api.unsplash.com/search/photos", {
-          params: { query: category, orientation: "landscape", per_page: 30 },
-          headers: { Authorization: `Client-ID ${config.UNSPLASH_ACCESS_KEY}` },
-          timeout: 10_000,
-        });
-
-        if (!search.data.results.length) return null;
-
-        results = search.data.results.map((photo) => ({
-          id: photo.id,
-          url: photo.urls.regular,
-          downloadLocation: photo.links.download_location,
-          photographerName: photo.user.name,
-          photographerUrl: photo.user.links.html,
-        }));
-
-        unsplashSearchCache.set(category, results);
-        logger.info({ category, count: results.length }, "Cached Unsplash search results for category");
+        provider.trackDownload?.(candidate);
+        const buffer = await fetchRemoteImage(candidate.url);
+        logger.info(
+          { provider: provider.name, category, title, index, author: candidate.attribution.authorName },
+          "Selected stock image background",
+        );
+        return { buffer, attribution: candidate.attribution };
       } catch (err) {
-        logger.warn({ err, category }, "Unsplash fetch failed — falling back to gradient");
-        return null;
+        logger.warn({ err, provider: provider.name, category, imageUrl: candidate.url }, "Stock image download failed — trying next provider");
       }
     }
 
-    // Pick a photo deterministically based on post title
-    const index = hashString(title) % results.length;
-    const photo = results[index];
-
-    try {
-      // Trigger download tracking (required by Unsplash ToS)
-      axios.get(photo.downloadLocation, {
-        headers: { Authorization: `Client-ID ${config.UNSPLASH_ACCESS_KEY}` },
-        timeout: 5_000,
-      }).catch(() => {});
-
-      const img = await axios.get<ArrayBuffer>(photo.url, {
-        responseType: "arraybuffer",
-        timeout: 15_000,
-      });
-
-      logger.info({ category, title, photoId: photo.id, index, photographer: photo.photographerName }, "Selected Unsplash background");
-      return {
-        buffer: Buffer.from(img.data),
-        attribution: {
-          photographerName: photo.photographerName,
-          photographerUrl: photo.photographerUrl,
-        },
-      };
-    } catch (err) {
-      logger.warn({ err, category, photoId: photo.id }, "Unsplash image download failed — falling back to gradient");
-      return null;
-    }
+    return null;
   }
 
   /** Generate a gradient background when no image is configured. */
@@ -146,22 +116,30 @@ export class FeaturedImageService {
     return sharp(Buffer.from(svg)).png().toBuffer();
   }
 
-  /** Generate a featured image and return PNG bytes with optional Unsplash attribution. */
+  /** Generate a featured image and return PNG bytes with optional stock attribution. */
   async generate(params: FeaturedImageRequest): Promise<FeaturedImageResult> {
-    // AI-generated mode: delegate to Gemini, skip the standard sharp/canvas pipeline
-    if (params.mode === "AI_GENERATED" && params.geminiApiKey) {
-      const gemini = new GeminiImageService(params.geminiApiKey);
-      const buffer = await gemini.generate({
+    // AI-generated mode: delegate to the configured provider, then normalize here
+    // so every provider produces the same 1200x628 PNG output.
+    if (params.mode === "AI_GENERATED") {
+      if (!params.aiImageProvider) {
+        throw new Error("No AI image provider configured for this blog");
+      }
+      const provider = createImageProvider(params.aiImageProvider);
+      const generated = await provider.generate({
         title: params.title,
         category: params.category,
         style: params.aiImageStyle || "cyberpunk",
         tags: params.tags,
       });
+      const buffer = await sharp(generated)
+        .resize(WIDTH, HEIGHT, { fit: "cover", position: "centre" })
+        .png()
+        .toBuffer();
       return { buffer };
     }
 
     let resized: Buffer;
-    let unsplashAttribution: UnsplashAttribution | undefined;
+    let stockAttribution: StockImageAttribution | undefined;
 
     if (params.backgroundImageUrl) {
       // Load background — URL over HTTP, or a plain filename from bundled assets.
@@ -196,19 +174,19 @@ export class FeaturedImageService {
         .png()
         .toBuffer();
     } else {
-      // No background image configured — try Unsplash, then gradient fallback
-      const unsplashResult = await this.fetchUnsplashBackground(params.category, params.title);
-      if (unsplashResult) {
-        resized = await sharp(unsplashResult.buffer)
+      // No background image configured — try configured stock providers, then gradient fallback
+      const stockResult = await this.fetchStockBackground(params.category, params.title);
+      if (stockResult) {
+        resized = await sharp(stockResult.buffer)
           .resize(WIDTH, HEIGHT, { fit: "cover", position: "attention" })
           .png()
           .toBuffer();
-        unsplashAttribution = unsplashResult.attribution;
+        stockAttribution = stockResult.attribution;
       } else {
         resized = await this.generateGradientBackground(params.category);
       }
     }
 
-    return { buffer: resized, unsplashAttribution };
+    return { buffer: resized, stockAttribution };
   }
 }

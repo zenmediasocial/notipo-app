@@ -6,8 +6,8 @@ import { CredentialService } from "../services/credential.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
 import { NotionService } from "../services/notion.service.js";
 import { syncWpCategories } from "../lib/sync-wp-categories.js";
-import { resolveGeminiApiKey } from "../lib/gemini-key.js";
-import { getEffectivePlan, isSelfHosted } from "../lib/plan-limits.js";
+import { normalizeAiImageProviderConfig, resolveAiImageProvider, AI_IMAGE_PROVIDERS } from "../lib/ai-image-provider.js";
+import { getEffectivePlan } from "../lib/plan-limits.js";
 import { isPrivateUrl } from "../lib/url-validation.js";
 import { config } from "../config.js";
 import { logger } from "../lib/logger.js";
@@ -27,8 +27,11 @@ const wordpressSettingsSchema = z.object({
   appPassword: z.string().min(1),
 });
 
-const geminiKeySchema = z.object({
-  apiKey: z.string().min(20).max(200),
+const aiImageProviderSchema = z.object({
+  provider: z.enum(AI_IMAGE_PROVIDERS),
+  model: z.string().max(200).optional(),
+  apiKey: z.string().min(1),
+  baseUrl: z.string().url().optional(),
 });
 
 const generalSettingsSchema = z.object({
@@ -60,12 +63,19 @@ export async function settingsRoutes(app: FastifyInstance) {
         codeHighlighter: true,
         featuredImageMode: true,
         aiImageStyle: true,
-        geminiCredentials: true,
+        aiImageProvider: true,
         webhookUrl: true,
         plan: true,
         trialEndsAt: true,
       },
     });
+
+    const credService = new CredentialService(app.prisma);
+    const storedAiImageProvider = await credService.getAiImageProvider(request.tenant.id);
+    const tenantAiImageProvider = storedAiImageProvider
+      ? normalizeAiImageProviderConfig(storedAiImageProvider)
+      : null;
+    const resolvedAiImageProvider = await resolveAiImageProvider(app.prisma, request.tenant.id);
 
     return {
       data: {
@@ -86,12 +96,16 @@ export async function settingsRoutes(app: FastifyInstance) {
         codeHighlighter: tenant.codeHighlighter,
         featuredImageMode: tenant.featuredImageMode,
         aiImageStyle: tenant.aiImageStyle,
-        // Whether AI mode can be switched on at all, and whether this blog
-        // brought its own key. Self-hosted falls back to the instance key;
-        // the hosted service does not — see lib/gemini-key.ts.
-        geminiAvailable:
-          tenant.geminiCredentials !== null || (isSelfHosted() && !!config.GEMINI_API_KEY),
-        geminiConfigured: tenant.geminiCredentials !== null,
+        // Non-secret provider summary for the UI. apiKey never leaves this route.
+        aiImageProvider: tenantAiImageProvider
+          ? {
+              provider: tenantAiImageProvider.provider,
+              model: tenantAiImageProvider.model,
+              baseUrl: tenantAiImageProvider.baseUrl ?? null,
+              configured: true,
+            }
+          : null,
+        aiImageAvailable: resolvedAiImageProvider !== null,
         webhookUrl: tenant.webhookUrl,
         plan: tenant.plan,
         effectivePlan: getEffectivePlan(tenant.plan, tenant.trialEndsAt),
@@ -211,28 +225,31 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   /**
-   * PUT /api/settings/gemini — store this blog's own Gemini key.
+   * PUT /api/settings/ai-image — store this blog's own AI image provider config.
    *
-   * Bring-your-own-key, because Gemini bills a prepaid account. On the hosted
-   * service there is no shared key to fall back to; a blog that wants
-   * AI-generated featured images pays for them itself.
+   * Bring-your-own-key, because image generation bills whoever owns the key.
+   * On the hosted service there is no shared key to fall back to; a blog that
+   * wants AI-generated featured images pays for them itself.
    */
-  app.put("/api/settings/gemini", async (request, reply) => {
-    const { apiKey } = geminiKeySchema.parse(request.body);
-    await new CredentialService(app.prisma).setGeminiCredentials(request.tenant.id, { apiKey });
+  app.put("/api/settings/ai-image", async (request, reply) => {
+    const body = aiImageProviderSchema.parse(request.body);
+    const normalized = normalizeAiImageProviderConfig(body);
+    if (!normalized) return reply.badRequest("An AI image API key is required");
+    await new CredentialService(app.prisma).setAiImageProvider(request.tenant.id, normalized);
     return reply.code(204).send();
   });
 
   /**
-   * DELETE /api/settings/gemini — remove the key.
+   * DELETE /api/settings/ai-image — remove the tenant provider config.
    *
-   * Falls back to STANDARD image generation in the same write. Leaving the mode
-   * on AI_GENERATED without a key would fail at publish time instead, which is
-   * a worse place to find out.
+   * Falls back to STANDARD image generation in the same write when no
+   * self-hosted provider fallback remains. Leaving the mode on AI_GENERATED
+   * without a provider would fail at publish time instead, which is a worse
+   * place to find out.
    */
-  app.delete("/api/settings/gemini", async (request, reply) => {
-    await new CredentialService(app.prisma).clearGeminiCredentials(request.tenant.id);
-    if (!(await resolveGeminiApiKey(app.prisma, request.tenant.id))) {
+  app.delete("/api/settings/ai-image", async (request, reply) => {
+    await new CredentialService(app.prisma).clearAiImageProvider(request.tenant.id);
+    if (!(await resolveAiImageProvider(app.prisma, request.tenant.id))) {
       await app.prisma.tenant.updateMany({
         where: { id: request.tenant.id, featuredImageMode: "AI_GENERATED" },
         data: { featuredImageMode: "STANDARD" },
@@ -250,14 +267,14 @@ export async function settingsRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "Webhook URL points to a private/internal address" });
     }
 
-    // AI mode spends money against a Gemini key. Refuse to turn it on unless
+    // AI mode spends money against a provider key. Refuse to turn it on unless
     // one resolves for this blog, so the switch cannot be flipped into someone
     // else's billing account.
     if (body.featuredImageMode === "AI_GENERATED") {
-      const key = await resolveGeminiApiKey(app.prisma, request.tenant.id);
-      if (!key) {
+      const providerConfig = await resolveAiImageProvider(app.prisma, request.tenant.id);
+      if (!providerConfig) {
         return reply.badRequest(
-          "AI-generated featured images need a Gemini API key. Add one under Settings first.",
+          "AI-generated featured images need an image provider API key. Add one under Settings first.",
         );
       }
     }

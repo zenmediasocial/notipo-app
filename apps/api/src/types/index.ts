@@ -1,4 +1,6 @@
 import type { CodeHighlighter } from "@prisma/client";
+import type { AiImageProviderConfig } from "../lib/ai-image-provider.js";
+import type { StockImageAttribution } from "../services/stock-image-providers/types.js";
 
 // Notion block conversion output
 export interface NotionConversionResult {
@@ -70,24 +72,19 @@ export interface FeaturedImageRequest {
   title: string;
   category: string;
   backgroundImageUrl?: string;
-  /** When set to AI_GENERATED, uses Gemini instead of the standard sharp/canvas pipeline. */
+  /** When set to AI_GENERATED, uses the configured AI image provider instead of the standard sharp/canvas pipeline. */
   mode?: "STANDARD" | "AI_GENERATED";
-  /** Gemini key to bill the generation to. Absent means AI mode is unavailable. */
-  geminiApiKey?: string;
+  /** Provider config to bill the generation to. Absent means AI mode is unavailable. */
+  aiImageProvider?: AiImageProviderConfig;
   /** AI image style (e.g. "comic book", "watercolor"). Only used when mode is AI_GENERATED. */
   aiImageStyle?: string;
-  /** Post tags — passed to Gemini for context. */
+  /** Post tags — passed to the AI image provider for context. */
   tags?: string[];
-}
-
-export interface UnsplashAttribution {
-  photographerName: string;
-  photographerUrl: string;
 }
 
 export interface FeaturedImageResult {
   buffer: Buffer;
-  unsplashAttribution?: UnsplashAttribution;
+  stockAttribution?: StockImageAttribution;
 }
 
 // Gutenberg conversion

@@ -30,8 +30,13 @@ interface SettingsData {
     codeHighlighter: string;
     featuredImageMode: string;
     aiImageStyle: string | null;
-    geminiAvailable: boolean;
-    geminiConfigured: boolean;
+    aiImageProvider: {
+      provider: string;
+      model: string;
+      baseUrl: string | null;
+      configured: boolean;
+    } | null;
+    aiImageAvailable: boolean;
     webhookUrl: string | null;
     effectivePlan: string;
   };
@@ -59,8 +64,8 @@ export default function SettingsPage() {
           <FeaturedImageCard
             mode={cfg.featuredImageMode}
             style={cfg.aiImageStyle}
-            geminiAvailable={cfg.geminiAvailable}
-            geminiConfigured={cfg.geminiConfigured}
+            providerConfig={cfg.aiImageProvider}
+            aiImageAvailable={cfg.aiImageAvailable}
             isPro={cfg.effectivePlan === "PRO"}
             onUpdate={refetch}
           />
@@ -439,30 +444,82 @@ const AI_IMAGE_STYLES = [
   { value: "retro", label: "Retro" },
 ];
 
+const AI_IMAGE_PROVIDERS = [
+  {
+    value: "GEMINI",
+    label: "Gemini",
+    defaultModel: "gemini-2.5-flash-image",
+    placeholder: "AIza…",
+    docsUrl: "https://aistudio.google.com/apikey",
+    docsLabel: "aistudio.google.com/apikey",
+  },
+  {
+    value: "OPENROUTER",
+    label: "OpenRouter",
+    defaultModel: "google/gemini-2.5-flash-image",
+    placeholder: "sk-or-…",
+    docsUrl: "https://openrouter.ai/keys",
+    docsLabel: "openrouter.ai/keys",
+  },
+  {
+    value: "FAL",
+    label: "Fal.ai",
+    defaultModel: "fal-ai/flux/schnell",
+    placeholder: "Fal key",
+    docsUrl: "https://fal.ai/dashboard/keys",
+    docsLabel: "fal.ai/dashboard/keys",
+  },
+  {
+    value: "MUAPI",
+    label: "MUAPI",
+    defaultModel: "flux-schnell",
+    placeholder: "MUAPI key",
+    docsUrl: "https://muapi.ai/docs/authentication",
+    docsLabel: "muapi.ai/docs/authentication",
+  },
+] as const;
+
 function FeaturedImageCard({
   mode,
   style,
-  geminiAvailable,
-  geminiConfigured,
+  providerConfig,
+  aiImageAvailable,
   isPro,
   onUpdate,
 }: {
   mode: string;
   style: string | null;
-  geminiAvailable: boolean;
-  geminiConfigured: boolean;
+  providerConfig: SettingsData["data"]["aiImageProvider"];
+  aiImageAvailable: boolean;
   isPro: boolean;
   onUpdate: () => void;
 }) {
   const { call } = useApiCall();
   const [selectedStyle, setSelectedStyle] = useState(style ?? "cyberpunk");
+  const [provider, setProvider] = useState(providerConfig?.provider ?? "GEMINI");
+  const [model, setModel] = useState(providerConfig?.model ?? "");
+  const [baseUrl, setBaseUrl] = useState(providerConfig?.baseUrl ?? "");
   const [keyInput, setKeyInput] = useState("");
   const [savingKey, setSavingKey] = useState(false);
+
+  const providerMeta =
+    AI_IMAGE_PROVIDERS.find((option) => option.value === provider) ?? AI_IMAGE_PROVIDERS[0];
+  const configuredProviderMeta = providerConfig
+    ? AI_IMAGE_PROVIDERS.find((option) => option.value === providerConfig.provider)
+    : undefined;
 
   async function saveKey() {
     setSavingKey(true);
     try {
-      await call("/api/settings/gemini", { method: "PUT", body: { apiKey: keyInput.trim() } });
+      await call("/api/settings/ai-image", {
+        method: "PUT",
+        body: {
+          provider,
+          model: model.trim() || undefined,
+          apiKey: keyInput,
+          baseUrl: baseUrl.trim() || undefined,
+        },
+      });
       setKeyInput("");
       onUpdate();
     } finally {
@@ -473,7 +530,7 @@ function FeaturedImageCard({
   async function removeKey() {
     setSavingKey(true);
     try {
-      await call("/api/settings/gemini", { method: "DELETE" });
+      await call("/api/settings/ai-image", { method: "DELETE" });
       onUpdate();
     } finally {
       setSavingKey(false);
@@ -502,7 +559,7 @@ function FeaturedImageCard({
     }
   }
 
-  const canUseAi = geminiAvailable && isPro;
+  const canUseAi = aiImageAvailable && isPro;
 
   return (
     <Card>
@@ -531,14 +588,15 @@ function FeaturedImageCard({
           </Button>
         </div>
 
-        {/* Bring your own key: Gemini sells prepaid accounts only, so image
-            generation is billed to whoever owns the key. */}
-        <div className="space-y-2">
-          <Label htmlFor="gemini-key">Gemini API key</Label>
-          {geminiConfigured ? (
+        {/* Bring your own key: image generation is billed to whoever owns the key. */}
+        <div className="space-y-3">
+          <Label>AI image provider</Label>
+          {providerConfig?.configured ? (
             <div className="flex items-center gap-2">
               <p className="flex-1 text-xs text-muted-foreground">
-                A key is saved. AI-generated images are billed to it.
+                {(configuredProviderMeta?.label ?? providerConfig.provider)} is saved
+                {providerConfig.model ? ` with model ${providerConfig.model}` : ""}.
+                AI-generated images are billed to it.
               </p>
               <Button size="sm" variant="outline" onClick={removeKey} disabled={savingKey}>
                 Remove
@@ -546,42 +604,84 @@ function FeaturedImageCard({
             </div>
           ) : (
             <>
+              <div className="flex flex-wrap gap-2">
+                {AI_IMAGE_PROVIDERS.map((option) => (
+                  <Button
+                    key={option.value}
+                    type="button"
+                    variant={provider === option.value ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setProvider(option.value)}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="ai-image-model">Model (optional)</Label>
+                  <Input
+                    id="ai-image-model"
+                    value={model}
+                    placeholder={providerMeta.defaultModel}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ai-image-base-url">Base URL (optional)</Label>
+                  <Input
+                    id="ai-image-base-url"
+                    type="url"
+                    value={baseUrl}
+                    placeholder="https://"
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                  />
+                </div>
+              </div>
+
               <div className="flex gap-2">
                 <Input
-                  id="gemini-key"
+                  id="ai-image-key"
                   type="password"
                   autoComplete="off"
-                  placeholder="AIza…"
+                  placeholder={providerMeta.placeholder}
                   value={keyInput}
                   onChange={(e) => setKeyInput(e.target.value)}
                 />
-                <Button size="sm" onClick={saveKey} disabled={savingKey || keyInput.length < 20}>
+                <Button size="sm" onClick={saveKey} disabled={savingKey || !keyInput.trim()}>
                   Save
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Needed for AI-generated images, and billed to your own Gemini account.
+                Needed for AI-generated images, and billed to your own {providerMeta.label} account.
                 Create one at{" "}
                 <a
-                  href="https://aistudio.google.com/apikey"
+                  href={providerMeta.docsUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="underline"
                 >
-                  aistudio.google.com/apikey
+                  {providerMeta.docsLabel}
                 </a>
                 .
               </p>
             </>
           )}
+
+          {aiImageAvailable && !providerConfig?.configured && (
+            <p className="text-xs text-muted-foreground">
+              An instance-level AI image provider is available. Add a provider key here to bill this blog separately.
+            </p>
+          )}
         </div>
 
-        {!geminiAvailable && (
+        {!aiImageAvailable && (
           <p className="text-xs text-muted-foreground">
-            AI image generation needs a Gemini API key.
+            AI image generation needs an image provider API key.
           </p>
         )}
-        {geminiAvailable && !isPro && (
+        {aiImageAvailable && !isPro && (
           <p className="text-xs text-muted-foreground">
             AI image generation is available on the Pro plan.
           </p>
