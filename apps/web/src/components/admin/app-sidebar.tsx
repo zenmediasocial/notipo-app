@@ -11,6 +11,7 @@ import {
   Users,
   LogOut,
   Download,
+  Globe,
 } from "lucide-react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
@@ -30,6 +31,7 @@ import {
 
 const tenantNavItems = [
   { title: "Dashboard", href: "/admin", icon: LayoutDashboard },
+  { title: "Blogs", href: "/admin/blogs", icon: Globe },
   { title: "Posts", href: "/admin/posts", icon: FileText },
   { title: "Categories", href: "/admin/categories", icon: FolderTree },
   { title: "Jobs", href: "/admin/jobs", icon: Activity },
