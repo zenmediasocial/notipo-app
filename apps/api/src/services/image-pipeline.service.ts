@@ -52,6 +52,7 @@ export class ImagePipelineService {
   /** Process all images in a post's markdown content. */
   async processImages(
     tenantId: string,
+    siteId: string,
     postId: string,
     images: ImageRef[],
     originalContent: string,
@@ -67,7 +68,7 @@ export class ImagePipelineService {
 
       // Check cache
       const cached = await this.prisma.imageMapping.findUnique({
-        where: { tenantId_notionImageUrl: { tenantId, notionImageUrl: base } },
+        where: { siteId_notionImageUrl: { siteId, notionImageUrl: base } },
       });
 
       if (cached) {
@@ -112,6 +113,7 @@ export class ImagePipelineService {
         const mapping = await this.prisma.imageMapping.create({
           data: {
             tenantId,
+            siteId,
             notionImageUrl: base,
             wpImageUrl: media.source_url,
             wpMediaId: media.id,

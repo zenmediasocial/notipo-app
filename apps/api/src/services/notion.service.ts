@@ -4,6 +4,7 @@
  */
 
 import { Client } from "@notionhq/client";
+import { extractPageRoutingContext } from "../lib/site-config.js";
 import { logger } from "../lib/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -370,5 +371,20 @@ export class NotionService {
     const props = (page as { properties?: Record<string, unknown> }).properties;
     const status = props?.["Status"] as { select?: { name?: string } } | undefined;
     return status?.select?.name ?? null;
+  }
+
+  /**
+   * Retrieve a page once and return everything site routing needs: Status,
+   * the parent posts-database ID (which copy it lives in), and the raw page
+   * for Configuration-row detection.
+   */
+  async getPageContext(pageId: string): Promise<{
+    status: string | null;
+    parentDatabaseId: string | null;
+    page: unknown;
+  }> {
+    const page = await this.getPageProperties(pageId);
+    const { status, parentDatabaseId } = extractPageRoutingContext(page);
+    return { status, parentDatabaseId, page };
   }
 }

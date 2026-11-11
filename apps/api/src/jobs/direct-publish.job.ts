@@ -8,6 +8,7 @@ import { logger } from "../lib/logger.js";
 
 interface DirectPublishPayload {
   tenantId: string;
+  siteId: string;
   title: string;
   markdown: string;
   category?: string;
@@ -29,8 +30,8 @@ export async function registerDirectPublishJob(boss: PgBoss, prisma: PrismaClien
   await boss.createQueue("direct-publish");
   await boss.work<DirectPublishPayload>("direct-publish", { batchSize: 1 }, async (jobs) => {
     const job = jobs[0];
-    const { tenantId, publish, existingPostId, scheduledAt, ...input } = job.data;
-    const log = logger.child({ jobId: job.id, tenantId, title: input.title });
+    const { tenantId, siteId, publish, existingPostId, scheduledAt, ...input } = job.data;
+    const log = logger.child({ jobId: job.id, tenantId, siteId, title: input.title });
 
     log.info("Starting direct publish");
 
@@ -68,7 +69,7 @@ export async function registerDirectPublishJob(boss: PgBoss, prisma: PrismaClien
         eventBus.emit("job:update", { tenantId, jobId: dbJob.id, type: "DIRECT_PUBLISH", status: "RUNNING", step });
       };
 
-      const { postId } = await syncService.syncDirect(tenantId, { ...input, scheduledAt }, onStep, existingPostId);
+      const { postId } = await syncService.syncDirect(tenantId, siteId, { ...input, scheduledAt }, onStep, existingPostId);
 
       // Build result summary
       const post = await prisma.post.findFirst({

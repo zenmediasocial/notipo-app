@@ -4,13 +4,14 @@ import type { NotionService } from "../services/notion.service.js";
 import { logger } from "./logger.js";
 
 /**
- * Fetches all categories and tags from a tenant's WordPress site and upserts
+ * Fetches all categories and tags from a site's WordPress install and upserts
  * them into the DB, linking name → WP ID.
  * Does NOT overwrite backgroundImage or wpTagIds on existing categories.
  */
 export async function syncWpCategories(
   prisma: PrismaClient,
   tenantId: string,
+  siteId: string,
   wp: WordPressService,
   notion?: NotionService,
   databaseId?: string,
@@ -22,21 +23,21 @@ export async function syncWpCategories(
 
   for (const wpCat of wpCategories) {
     await prisma.category.upsert({
-      where: { tenantId_name: { tenantId, name: wpCat.name } },
+      where: { siteId_name: { siteId, name: wpCat.name } },
       update: { wpCategoryId: wpCat.id },
-      create: { name: wpCat.name, wpCategoryId: wpCat.id, tenantId, wpTagIds: [] },
+      create: { name: wpCat.name, wpCategoryId: wpCat.id, tenantId, siteId, wpTagIds: [] },
     });
   }
 
   for (const wpTag of wpTags) {
     await prisma.tag.upsert({
-      where: { tenantId_name: { tenantId, name: wpTag.name } },
+      where: { siteId_name: { siteId, name: wpTag.name } },
       update: { wpTagId: wpTag.id },
-      create: { name: wpTag.name, wpTagId: wpTag.id, tenantId },
+      create: { name: wpTag.name, wpTagId: wpTag.id, tenantId, siteId },
     });
   }
 
-  logger.debug({ tenantId, categories: wpCategories.length, tags: wpTags.length }, "Synced WP taxonomy");
+  logger.debug({ tenantId, siteId, categories: wpCategories.length, tags: wpTags.length }, "Synced WP taxonomy");
 
   // Push category/tag names to Notion database as select options (if connected)
   if (notion && databaseId) {

@@ -31,6 +31,7 @@ import { accountRoutes } from "./routes/account.js";
 import { importRoutes } from "./routes/import.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { uploadRoutes } from "./routes/uploads.js";
+import { siteRoutes } from "./routes/sites.js";
 import { templateRoutes } from "./routes/templates.js";
 import { registerAllJobs } from "./jobs/index.js";
 
@@ -143,6 +144,7 @@ export async function buildApp() {
   await app.register(postRoutes);
   await app.register(categoryRoutes);
   await app.register(settingsRoutes);
+  await app.register(siteRoutes);
   await app.register(jobRoutes);
   await app.register(adminRoutes);
   await app.register(userRoutes);

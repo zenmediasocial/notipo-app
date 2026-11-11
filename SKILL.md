@@ -26,6 +26,13 @@ export NOTIPO_URL="https://notipo.com"
 export NOTIPO_API_KEY="ntp_your-api-key"
 ```
 
+## Multiple sites
+
+- One blog = one Notion template copy = one WordPress site. Connect/list sites in Settings → Blogs or `GET/POST /api/sites`.
+- Posts, categories, tags and image mappings belong to a `site`; post endpoints accept an optional `siteId` (default: the first-connected site).
+- The posts database's first row, `Configuration` (`Is Config`), is reserved: it carries the site key and last-sync stamp and is never synced as a post. `POST /api/sites/:id/lock` locks it after setup.
+- Routing is `pageId → parent database → Site.notionDatabaseId`; trigger statuses stay account-wide.
+
 ## Core Workflow
 
 1. **Generate** — AI agent creates title, body (markdown), category, tags, SEO keyword

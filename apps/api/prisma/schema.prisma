@@ -48,6 +48,7 @@ model Tenant {
   stripeSubscriptionId String?   @unique
 
   users      User[]
+  sites      Site[]
   posts      Post[]
   categories Category[]
   tags       Tag[]
@@ -64,6 +65,41 @@ model Tenant {
 
   @@index([notionWorkspaceId])
   @@map("tenants")
+}
+
+/// One connected blog = one copy of the Notipo Notion template = one
+/// WordPress site. Each template copy is a self-contained top-level teamspace
+/// page whose posts database holds a reserved "Configuration" row (key, last
+/// sync, lock). Posts/categories/tags/image mappings are scoped by siteId, so
+/// each post keeps a single status and wpPostId.
+model Site {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Notion template copy
+  key              String  @unique
+  name             String
+  notionRootPageId String?
+  notionDatabaseId String?
+
+  // WordPress target. Credentials are AES-256-GCM JSON {siteUrl, username, appPassword}.
+  // Legacy rows may decrypt to the same shape copied from tenants.wordpressCredentials.
+  wordpressCredentials String?
+  wpSiteUrl            String?
+  wpSeoPlugin          String?
+
+  posts      Post[]
+  categories Category[]
+  tags       Tag[]
+  imageCache ImageMapping[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, notionDatabaseId])
+  @@index([tenantId])
+  @@map("sites")
 }
 
 enum Plan {
@@ -113,6 +149,8 @@ model Post {
   id       String @id @default(cuid())
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteId   String
+  site     Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   // Notion source
   notionPageId   String?
@@ -162,8 +200,9 @@ model Post {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([tenantId, notionPageId])
+  @@unique([siteId, notionPageId])
   @@index([tenantId, status])
+  @@index([siteId, status])
   @@map("posts")
 }
 
@@ -180,6 +219,8 @@ model Category {
   id       String @id @default(cuid())
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteId   String
+  site     Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   name            String
   wpCategoryId    Int?
@@ -197,7 +238,7 @@ model Category {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([tenantId, name])
+  @@unique([siteId, name])
   @@map("categories")
 }
 
@@ -205,6 +246,8 @@ model Tag {
   id       String @id @default(cuid())
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteId   String
+  site     Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   name    String
   wpTagId Int?
@@ -212,7 +255,7 @@ model Tag {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([tenantId, name])
+  @@unique([siteId, name])
   @@map("tags")
 }
 
@@ -220,6 +263,8 @@ model ImageMapping {
   id       String @id @default(cuid())
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  siteId   String
+  site     Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   notionImageUrl String
   wpImageUrl     String
@@ -231,8 +276,9 @@ model ImageMapping {
 
   createdAt DateTime @default(now())
 
-  @@unique([tenantId, notionImageUrl])
+  @@unique([siteId, notionImageUrl])
   @@index([tenantId, postId])
+  @@index([siteId, postId])
   @@map("image_mappings")
 }
 

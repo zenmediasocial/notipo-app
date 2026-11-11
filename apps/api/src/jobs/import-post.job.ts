@@ -7,6 +7,7 @@ import { logger } from "../lib/logger.js";
 
 interface ImportPostPayload {
   tenantId: string;
+  siteId: string;
   wpPostId: number;
   overwrite?: boolean;
   wpCategoryMap?: Record<number, string>;
@@ -17,8 +18,8 @@ export async function registerImportPostJob(boss: PgBoss, prisma: PrismaClient, 
   await boss.createQueue("import-post");
   await boss.work<ImportPostPayload>("import-post", { batchSize: 1 }, async (jobs) => {
     const job = jobs[0];
-    const { tenantId, wpPostId, overwrite = false, wpCategoryMap, wpTagMap } = job.data;
-    const log = logger.child({ jobId: job.id, tenantId, wpPostId });
+    const { tenantId, siteId, wpPostId, overwrite = false, wpCategoryMap, wpTagMap } = job.data;
+    const log = logger.child({ jobId: job.id, tenantId, siteId, wpPostId });
 
     log.info("Starting WordPress post import");
 
@@ -45,7 +46,7 @@ export async function registerImportPostJob(boss: PgBoss, prisma: PrismaClient, 
       };
 
       const result = await importService.importPost(
-        tenantId, wpPostId, overwrite, onStep, wpCategoryMap, wpTagMap,
+        tenantId, siteId, wpPostId, overwrite, onStep, wpCategoryMap, wpTagMap,
       );
 
       await prisma.job.update({

@@ -1,9 +1,11 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { createHmac, timingSafeEqual } from "crypto";
 import { config } from "../config.js";
-import { NotionService } from "../services/notion.service.js";
 import { CredentialService } from "../services/credential.service.js";
+import { SiteService } from "../services/site.service.js";
+import { NotionService } from "../services/notion.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
+import { isConfigurationRow } from "../lib/site-config.js";
 import { canUseWebhooks } from "../lib/plan-limits.js";
 import { logger } from "../lib/logger.js";
 import { captureServer } from "../lib/posthog-server.js";
@@ -119,25 +121,42 @@ export async function notionWebhookRoutes(app: FastifyInstance) {
 
     // Get tenant's Notion credentials
     const credService = new CredentialService(app.prisma);
+    const siteService = new SiteService(app.prisma);
     const creds = await credService.getNotionCredentials(tenant.id);
     if (!creds) {
       log.warn({ tenantId: tenant.id }, "Tenant has no Notion credentials");
       return reply.code(200).send();
     }
 
-    // Fetch current page status from Notion
+    // Fetch the page once: status + which copy's database it lives in
     const notion = new NotionService(creds.accessToken);
-    let status: string | null;
+    let context: Awaited<ReturnType<typeof notion.getPageContext>>;
     try {
-      status = await notion.getPageStatus(pageId);
+      context = await notion.getPageContext(pageId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log.error({ tenantId: tenant.id, pageId, error: message }, "Failed to fetch page status");
+      log.error({ tenantId: tenant.id, pageId, error: message }, "Failed to fetch page context");
       return reply.code(200).send();
     }
 
+    // The reserved Configuration row is never a post
+    if (isConfigurationRow(context.page)) {
+      log.debug({ tenantId: tenant.id, pageId }, "Ignoring Configuration row");
+      return reply.code(200).send();
+    }
+
+    const status = context.status;
     if (!status) {
       log.debug({ tenantId: tenant.id, pageId }, "Page has no Status — ignoring");
+      return reply.code(200).send();
+    }
+
+    // Route by which copy's posts database the page lives in
+    const site = context.parentDatabaseId
+      ? await siteService.findByNotionDatabaseId(tenant.id, context.parentDatabaseId)
+      : null;
+    if (!site) {
+      log.warn({ tenantId: tenant.id, pageId, parentDatabaseId: context.parentDatabaseId }, "No site found for the page's database — ignoring");
       return reply.code(200).send();
     }
 
@@ -147,12 +166,12 @@ export async function notionWebhookRoutes(app: FastifyInstance) {
     if (status === tenant.notionTriggerStatus) {
       // If already synced, check if WP post still exists before blocking
       const existingPost = await app.prisma.post.findUnique({
-        where: { tenantId_notionPageId: { tenantId: tenant.id, notionPageId: pageId } },
+        where: { siteId_notionPageId: { siteId: site.id, notionPageId: pageId } },
         select: { id: true, wpPostId: true, wpFeaturedMediaId: true, status: true },
       });
       if (existingPost?.wpPostId) {
         let wpPostAlive = true;
-        const wpCreds = await credService.getWordPressCredentials(tenant.id);
+        const wpCreds = await siteService.getWordPressCredentials(site.id);
         if (wpCreds) {
           try {
             const wp = new WordPressService(wpCreds);
@@ -187,22 +206,22 @@ export async function notionWebhookRoutes(app: FastifyInstance) {
         return reply.code(200).send();
       }
 
-      log.info({ tenantId: tenant.id, pageId }, "Webhook: enqueuing sync-post");
+      log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Webhook: enqueuing sync-post");
       await app.boss.send(
         "sync-post",
-        { tenantId: tenant.id, notionPageId: pageId },
-        { singletonKey: `sync:${pageId}` },
+        { tenantId: tenant.id, siteId: site.id, notionPageId: pageId },
+        { singletonKey: `sync:${site.id}:${pageId}` },
       );
       return reply.code(200).send();
     }
 
     // "Publish" → always re-sync from Notion then publish
     if (status === tenant.notionPublishTriggerStatus) {
-      log.info({ tenantId: tenant.id, pageId }, "Webhook: enqueuing sync-then-publish");
+      log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Webhook: enqueuing sync-then-publish");
       await app.boss.send(
         "sync-post",
-        { tenantId: tenant.id, notionPageId: pageId, thenPublish: true, forcePublish: true },
-        { singletonKey: `sync:${pageId}` },
+        { tenantId: tenant.id, siteId: site.id, notionPageId: pageId, thenPublish: true, forcePublish: true },
+        { singletonKey: `sync:${site.id}:${pageId}` },
       );
       return reply.code(200).send();
     }
@@ -217,11 +236,11 @@ export async function notionWebhookRoutes(app: FastifyInstance) {
         return reply.code(200).send();
       }
 
-      log.info({ tenantId: tenant.id, pageId }, "Webhook: enqueuing sync-post (with publish)");
+      log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Webhook: enqueuing sync-post (with publish)");
       await app.boss.send(
         "sync-post",
-        { tenantId: tenant.id, notionPageId: pageId, thenPublish: true },
-        { singletonKey: `sync:${pageId}` },
+        { tenantId: tenant.id, siteId: site.id, notionPageId: pageId, thenPublish: true },
+        { singletonKey: `sync:${site.id}:${pageId}` },
       );
       return reply.code(200).send();
     }

@@ -5,6 +5,7 @@ import { requireSession } from "../plugins/auth.js";
 import { CredentialService } from "../services/credential.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
 import { NotionService } from "../services/notion.service.js";
+import { SiteService } from "../services/site.service.js";
 import { syncWpCategories } from "../lib/sync-wp-categories.js";
 import { normalizeAiImageProviderConfig, resolveAiImageProvider, AI_IMAGE_PROVIDERS } from "../lib/ai-image-provider.js";
 import { getEffectivePlan } from "../lib/plan-limits.js";
@@ -71,6 +72,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     });
 
     const credService = new CredentialService(app.prisma);
+    const siteService = new SiteService(app.prisma);
+    const sites = await siteService.listSites(request.tenant.id);
+    const defaultSite = sites[0] ?? null;
     const storedAiImageProvider = await credService.getAiImageProvider(request.tenant.id);
     const tenantAiImageProvider = storedAiImageProvider
       ? normalizeAiImageProviderConfig(storedAiImageProvider)
@@ -90,9 +94,19 @@ export async function settingsRoutes(app: FastifyInstance) {
           updateTriggerStatus: tenant.notionUpdateTriggerStatus,
         },
         wordpress: {
-          configured: tenant.wordpressCredentials !== null,
-          siteUrl: tenant.wpSiteUrl,
+          configured: defaultSite?.hasCredentials ?? false,
+          siteUrl: defaultSite?.wpSiteUrl ?? null,
         },
+        sites: sites.map((s) => ({
+          id: s.id,
+          key: s.key,
+          name: s.name,
+          notionRootPageId: s.notionRootPageId,
+          notionDatabaseId: s.notionDatabaseId,
+          siteUrl: s.wpSiteUrl,
+          wpSeoPlugin: s.wpSeoPlugin,
+          configured: s.hasCredentials,
+        })),
         codeHighlighter: tenant.codeHighlighter,
         featuredImageMode: tenant.featuredImageMode,
         aiImageStyle: tenant.aiImageStyle,
@@ -114,10 +128,11 @@ export async function settingsRoutes(app: FastifyInstance) {
     };
   });
 
-  /** GET /api/settings/wordpress-credentials — return decrypted WP credentials for authenticated tenant */
+  /** GET /api/settings/wordpress-credentials — return decrypted WP credentials for the default site */
   app.get("/api/settings/wordpress-credentials", async (request, reply) => {
-    const credService = new CredentialService(app.prisma);
-    const creds = await credService.getWordPressCredentials(request.tenant.id);
+    const siteService = new SiteService(app.prisma);
+    const site = await siteService.getDefaultSite(request.tenant.id);
+    const creds = site ? await siteService.getWordPressCredentials(site.id) : null;
     if (!creds) {
       return reply.code(404).send({ error: "WordPress not connected" });
     }
@@ -164,16 +179,20 @@ export async function settingsRoutes(app: FastifyInstance) {
     return reply.code(204).send();
   });
 
-  /** DELETE /api/settings/wordpress — disconnect WordPress */
+  /** DELETE /api/settings/wordpress — disconnect WordPress from the default site */
   app.delete("/api/settings/wordpress", async (request, reply) => {
-    await app.prisma.tenant.update({
-      where: { id: request.tenant.id },
-      data: {
-        wordpressCredentials: null,
-        wpSiteUrl: null,
-        wpSeoPlugin: null,
-      },
-    });
+    const siteService = new SiteService(app.prisma);
+    const site = await siteService.getDefaultSite(request.tenant.id);
+    if (site) {
+      await app.prisma.site.update({
+        where: { id: site.id },
+        data: {
+          wordpressCredentials: null,
+          wpSiteUrl: null,
+          wpSeoPlugin: null,
+        },
+      });
+    }
 
     return reply.code(204).send();
   });
@@ -195,28 +214,39 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     const credService = new CredentialService(app.prisma);
-    await credService.setWordPressCredentials(request.tenant.id, {
-      siteUrl: body.siteUrl,
-      username: body.username,
-      appPassword: body.appPassword,
-    });
+    const siteService = new SiteService(app.prisma);
+    let site = await siteService.getDefaultSite(request.tenant.id);
+    if (site) {
+      await siteService.setWordPressCredentials(site.id, {
+        siteUrl: body.siteUrl,
+        username: body.username,
+        appPassword: body.appPassword,
+      });
+    } else {
+      // Legacy bootstrap: a tenant without any site gets one now. Multi-site
+      // connections go through /api/sites with a Notion template copy.
+      let host = "blog";
+      try { host = new URL(body.siteUrl).hostname; } catch { /* keep default name */ }
+      site = await siteService.createSite({
+        tenantId: request.tenant.id,
+        name: host,
+        wpSiteUrl: body.siteUrl,
+        wpCredentials: { username: body.username, appPassword: body.appPassword },
+      });
+    }
 
     // Detect SEO plugin (best-effort, non-blocking)
     const seoPlugin = await wp.detectSeoPlugin();
-    await app.prisma.tenant.update({
-      where: { id: request.tenant.id },
-      data: { wpSeoPlugin: seoPlugin },
-    });
+    await siteService.updateSiteConfig(site.id, { wpSeoPlugin: seoPlugin });
     if (seoPlugin) {
-      logger.info({ tenantId: request.tenant.id, seoPlugin }, "SEO plugin detected");
+      logger.info({ tenantId: request.tenant.id, siteId: site.id, seoPlugin }, "SEO plugin detected");
     }
 
     // Auto-sync WP categories into the DB (and push to Notion if connected)
     try {
       const notionCreds = await credService.getNotionCredentials(request.tenant.id);
-      const tenant = await app.prisma.tenant.findUniqueOrThrow({ where: { id: request.tenant.id }, select: { notionDatabaseId: true } });
       const notion = notionCreds ? new NotionService(notionCreds.accessToken) : undefined;
-      await syncWpCategories(app.prisma, request.tenant.id, wp, notion, tenant.notionDatabaseId ?? undefined);
+      await syncWpCategories(app.prisma, request.tenant.id, site.id, wp, notion, site.notionDatabaseId ?? undefined);
     } catch (e) {
       logger.warn({ err: e }, "Failed to auto-sync WP categories after credential save");
     }
@@ -298,8 +328,9 @@ export async function settingsRoutes(app: FastifyInstance) {
 
   /** GET /api/settings/wordpress-health — check WP connection health via app password introspection */
   app.get("/api/settings/wordpress-health", async (request, reply) => {
-    const credService = new CredentialService(app.prisma);
-    const creds = await credService.getWordPressCredentials(request.tenant.id);
+    const siteService = new SiteService(app.prisma);
+    const site = await siteService.getDefaultSite(request.tenant.id);
+    const creds = site ? await siteService.getWordPressCredentials(site.id) : null;
     if (!creds) return reply.code(404).send({ error: "WordPress not connected" });
 
     const wp = new WordPressService(creds);

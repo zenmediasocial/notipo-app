@@ -11,6 +11,7 @@ import type { PrismaClient } from "@prisma/client";
 import { WordPressService } from "./wordpress.service.js";
 import { FeaturedImageService } from "./featured-image.service.js";
 import { CredentialService } from "./credential.service.js";
+import { SiteService } from "./site.service.js";
 import { NotionService } from "./notion.service.js";
 import { convertMarkdownToGutenberg } from "./markdown-to-gutenberg.js";
 import { resolveAiImageProvider } from "../lib/ai-image-provider.js";
@@ -23,18 +24,19 @@ export class PublishService {
   /** Publish a post from the database to WordPress. */
   async publishPost(tenantId: string, postId: string, onStep?: (step: string) => void) {
     const credService = new CredentialService(this.prisma);
+    const siteService = new SiteService(this.prisma);
 
     // Load post with relations
     const post = await this.prisma.post.findFirst({
       where: { id: postId, tenantId },
-      include: { category: true, tenant: true },
+      include: { category: true, tenant: true, site: true },
     });
     if (!post) throw new Error("Post not found");
     if (!post.markdownContent) throw new Error("Post has no content");
 
-    // Get credentials
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) throw new Error("WordPress credentials not configured");
+    // WordPress is per-site
+    const wpCreds = await siteService.getWordPressCredentials(post.siteId);
+    if (!wpCreds) throw new Error("WordPress is not connected for this site");
 
     const wp = new WordPressService(wpCreds);
 
@@ -109,7 +111,7 @@ export class PublishService {
           keyword: post.seoKeyword,
           title: "%title%",
           description: seoDescription ?? "",
-        }, post.tenant.wpSeoPlugin);
+        }, post.site.wpSeoPlugin);
         logger.info({ wpPostId: post.wpPostId, seoKeyword: post.seoKeyword }, "SEO meta applied");
       } else {
         logger.warn({ postId }, "seoKeyword not set — skipping SEO (set 'SEO Keyword' in Notion)");
@@ -129,7 +131,7 @@ export class PublishService {
       onStep?.("Converting to Gutenberg…");
       let wpContent = convertMarkdownToGutenberg(post.markdownContent, {
         highlighter: post.tenant.codeHighlighter,
-        seoPlugin: post.tenant.wpSeoPlugin,
+        seoPlugin: post.site.wpSeoPlugin,
       });
 
       // Generate featured image if needed
@@ -196,7 +198,7 @@ export class PublishService {
           keyword: post.seoKeyword,
           title: "%title%",
           description: seoDescription ?? "",
-        }, post.tenant.wpSeoPlugin);
+        }, post.site.wpSeoPlugin);
         logger.info({ wpPostId: wpPost.id, seoKeyword: post.seoKeyword }, "SEO meta applied");
       } else {
         logger.warn({ postId }, "seoKeyword not set — skipping SEO (set 'SEO Keyword' in Notion)");

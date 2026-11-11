@@ -10,6 +10,7 @@ import { logger } from "../lib/logger.js";
 
 interface SyncPostPayload {
   tenantId: string;
+  siteId: string;
   notionPageId: string;
   thenPublish?: boolean;
   forcePublish?: boolean;
@@ -20,15 +21,15 @@ export async function registerSyncPostJob(boss: PgBoss, prisma: PrismaClient, ev
   await boss.createQueue("sync-post");
   await boss.work<SyncPostPayload>("sync-post", { batchSize: 1 }, async (jobs) => {
     const job = jobs[0];
-    const { tenantId, notionPageId } = job.data;
+    const { tenantId, siteId, notionPageId } = job.data;
     const { thenPublish, forcePublish, wpSlug } = job.data;
-    const log = logger.child({ jobId: job.id, tenantId, notionPageId });
+    const log = logger.child({ jobId: job.id, tenantId, siteId, notionPageId });
 
     log.info("Starting post sync");
 
     // Check plan limits — only for new posts (not re-syncs)
     const existingPost = await prisma.post.findUnique({
-      where: { tenantId_notionPageId: { tenantId, notionPageId } },
+      where: { siteId_notionPageId: { siteId, notionPageId } },
       select: { id: true },
     });
     if (!existingPost) {
@@ -66,7 +67,7 @@ export async function registerSyncPostJob(boss: PgBoss, prisma: PrismaClient, ev
         await prisma.job.update({ where: { id: dbJob.id }, data: { result: { step, steps: syncSteps } } });
         eventBus.emit("job:update", { tenantId, jobId: dbJob.id, type: "SYNC_POST", status: "RUNNING", notionPageId, step });
       };
-      const { postId, wpStatus, wasPublished } = await syncService.syncPost(tenantId, notionPageId, onStep, wpSlug);
+      const { postId, wpStatus, wasPublished } = await syncService.syncPost(tenantId, siteId, notionPageId, onStep, wpSlug);
 
       // Build result summary from the synced post
       const post = await prisma.post.findFirst({
@@ -128,7 +129,7 @@ export async function registerSyncPostJob(boss: PgBoss, prisma: PrismaClient, ev
       // Mark post as FAILED if it exists
       await prisma.post
         .update({
-          where: { tenantId_notionPageId: { tenantId, notionPageId } },
+          where: { siteId_notionPageId: { siteId, notionPageId } },
           data: { status: "FAILED" },
         })
         .catch(() => undefined); // post may not exist yet if failure was early
@@ -147,7 +148,7 @@ export async function registerSyncPostJob(boss: PgBoss, prisma: PrismaClient, ev
 
       // Send webhook notification
       const failedPost = await prisma.post.findUnique({
-        where: { tenantId_notionPageId: { tenantId, notionPageId } },
+        where: { siteId_notionPageId: { siteId, notionPageId } },
         select: { title: true },
       });
       sendWebhook(prisma, tenantId, { jobType: "SYNC_POST", status: "FAILED", postTitle: failedPost?.title, error: message });

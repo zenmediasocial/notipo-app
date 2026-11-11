@@ -1,20 +1,24 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { CredentialService } from "../services/credential.service.js";
+import { SiteService } from "../services/site.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
 import { canImportFromWordPress } from "../lib/plan-limits.js";
 
 const importSingleSchema = z.object({
+  siteId: z.string().optional(),
   wpPostId: z.number().int().positive(),
   overwrite: z.boolean().optional().default(false),
 });
 
 const importAllSchema = z.object({
+  siteId: z.string().optional(),
   status: z.string().optional().default("any"),
   overwrite: z.boolean().optional().default(false),
 });
 
 const importBulkSchema = z.object({
+  siteId: z.string().optional(),
   wpPostIds: z.array(z.number().int().positive()).min(1).max(200),
   overwrite: z.boolean().optional().default(false),
 });
@@ -35,7 +39,7 @@ async function notionImportBlocker(app: FastifyInstance, tenantId: string, notio
 
 export async function importRoutes(app: FastifyInstance) {
   /** GET /api/import/wp-posts — List importable WordPress posts */
-  app.get<{ Querystring: { page?: string; perPage?: string; status?: string } }>(
+  app.get<{ Querystring: { siteId?: string; page?: string; perPage?: string; status?: string } }>(
     "/api/import/wp-posts",
     async (request, reply) => {
       const tenantId = request.tenant.id;
@@ -49,15 +53,18 @@ export async function importRoutes(app: FastifyInstance) {
         return reply.code(403).send({ error: "Import from WordPress requires a Pro plan" });
       }
 
-      const credService = new CredentialService(app.prisma);
-      const wpCreds = await credService.getWordPressCredentials(tenantId);
-      if (!wpCreds) {
-        return reply.code(400).send({ error: "WordPress not connected" });
+      const siteService = new SiteService(app.prisma);
+      const site = request.query.siteId
+        ? await siteService.getSiteForTenant(tenantId, request.query.siteId)
+        : await siteService.getDefaultSite(tenantId);
+      const wpCreds = site ? await siteService.getWordPressCredentials(site.id) : null;
+      if (!site || !wpCreds) {
+        return reply.code(400).send({ error: "WordPress not connected for this site" });
       }
 
       // Reported, not enforced: the list is still useful to browse, but the UI
       // needs to know it cannot import yet.
-      const notionIssue = await notionImportBlocker(app, tenantId, tenant.notionDatabaseId);
+      const notionIssue = await notionImportBlocker(app, tenantId, site.notionDatabaseId);
 
       const wp = new WordPressService(wpCreds);
       const page = Number(request.query.page) || 1;
@@ -69,7 +76,7 @@ export async function importRoutes(app: FastifyInstance) {
       // Find which posts are already imported
       const wpPostIds = result.posts.map((p) => p.id);
       const existing = await app.prisma.post.findMany({
-        where: { tenantId, wpPostId: { in: wpPostIds } },
+        where: { siteId: site.id, wpPostId: { in: wpPostIds } },
         select: { wpPostId: true },
       });
       const importedIds = existing.map((p) => p.wpPostId).filter(Boolean) as number[];
@@ -111,9 +118,12 @@ export async function importRoutes(app: FastifyInstance) {
     const notionIssue = await notionImportBlocker(app, tenantId, tenant.notionDatabaseId);
     if (notionIssue) return reply.code(400).send({ error: notionIssue });
 
-    const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) return reply.code(400).send({ error: "WordPress not connected" });
+    const siteService = new SiteService(app.prisma);
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : await siteService.getDefaultSite(tenantId);
+    const wpCreds = site ? await siteService.getWordPressCredentials(site.id) : null;
+    if (!site || !wpCreds) return reply.code(400).send({ error: "WordPress not connected for this site" });
 
     const wp = new WordPressService(wpCreds);
     const [cats, tags] = await Promise.all([wp.listCategories(), wp.listTags()]);
@@ -133,11 +143,12 @@ export async function importRoutes(app: FastifyInstance) {
     for (const wpPostId of wpPostIds) {
       await app.boss.send("import-post", {
         tenantId,
+        siteId: site.id,
         wpPostId,
         overwrite: body.overwrite,
         wpCategoryMap,
         wpTagMap,
-      }, { singletonKey: `import:${tenantId}:${wpPostId}` });
+      }, { singletonKey: `import:${site.id}:${wpPostId}` });
     }
 
     return reply.code(202).send({
@@ -161,11 +172,18 @@ export async function importRoutes(app: FastifyInstance) {
     const notionIssue = await notionImportBlocker(app, tenantId, tenant.notionDatabaseId);
     if (notionIssue) return reply.code(400).send({ error: notionIssue });
 
+    const siteService = new SiteService(app.prisma);
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : await siteService.getDefaultSite(tenantId);
+    if (!site) return reply.code(400).send({ error: "No site connected" });
+
     const jobId = await app.boss.send("import-post", {
       tenantId,
+      siteId: site.id,
       wpPostId: body.wpPostId,
       overwrite: body.overwrite,
-    }, { singletonKey: `import:${tenantId}:${body.wpPostId}` });
+    }, { singletonKey: `import:${site.id}:${body.wpPostId}` });
 
     return reply.code(202).send({
       data: { jobId, wpPostId: body.wpPostId, message: "Import job queued" },
@@ -189,10 +207,13 @@ export async function importRoutes(app: FastifyInstance) {
     if (notionIssue) return reply.code(400).send({ error: notionIssue });
 
     // Pre-resolve WP categories/tags once for efficiency
-    const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) {
-      return reply.code(400).send({ error: "WordPress not connected" });
+    const siteService = new SiteService(app.prisma);
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : await siteService.getDefaultSite(tenantId);
+    const wpCreds = site ? await siteService.getWordPressCredentials(site.id) : null;
+    if (!site || !wpCreds) {
+      return reply.code(400).send({ error: "WordPress not connected for this site" });
     }
 
     const wp = new WordPressService(wpCreds);
@@ -204,11 +225,12 @@ export async function importRoutes(app: FastifyInstance) {
     for (const wpPostId of body.wpPostIds) {
       const jobId = await app.boss.send("import-post", {
         tenantId,
+        siteId: site.id,
         wpPostId,
         overwrite: body.overwrite,
         wpCategoryMap,
         wpTagMap,
-      }, { singletonKey: `import:${tenantId}:${wpPostId}` });
+      }, { singletonKey: `import:${site.id}:${wpPostId}` });
       jobIds.push(jobId);
     }
 

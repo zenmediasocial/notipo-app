@@ -2,34 +2,61 @@ import type { PgBoss } from "pg-boss";
 import type { PrismaClient, Tenant } from "@prisma/client";
 import { NotionService } from "../services/notion.service.js";
 import { CredentialService } from "../services/credential.service.js";
+import { SiteService, type SiteRecord } from "../services/site.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
 import { syncWpCategories } from "./sync-wp-categories.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "poll-tenant" });
 
-/** Poll a single tenant's Notion database and enqueue sync/publish jobs as needed. */
+/**
+ * Poll every connected site of a tenant and enqueue sync/publish jobs.
+ * One blog = one Notion template copy = one posts database = one WordPress
+ * site. Events route by which copy's database they came from.
+ */
 export async function pollTenant(boss: PgBoss, prisma: PrismaClient, tenant: Tenant) {
   const credService = new CredentialService(prisma);
   const creds = await credService.getNotionCredentials(tenant.id);
-  if (!creds || !tenant.notionDatabaseId) return;
+  if (!creds) return;
 
+  const siteService = new SiteService(prisma);
+  const sites = await siteService.listSites(tenant.id);
   const notion = new NotionService(creds.accessToken);
 
+  for (const site of sites) {
+    if (!site.notionDatabaseId) continue;
+    try {
+      await pollSite(boss, prisma, tenant, notion, siteService, site);
+    } catch (e) {
+      log.warn({ tenantId: tenant.id, siteId: site.id, err: e }, "Failed to poll site");
+    }
+  }
+}
+
+async function pollSite(
+  boss: PgBoss,
+  prisma: PrismaClient,
+  tenant: Tenant,
+  notion: NotionService,
+  siteService: SiteService,
+  site: SiteRecord,
+) {
+  const databaseId = site.notionDatabaseId!;
+
   // Auto-sync WP categories so new ones are picked up (and push to Notion)
-  const wpCreds = await credService.getWordPressCredentials(tenant.id);
+  const wpCreds = await siteService.getWordPressCredentials(site.id);
   if (wpCreds) {
     try {
       const wp = new WordPressService(wpCreds);
-      await syncWpCategories(prisma, tenant.id, wp, notion, tenant.notionDatabaseId ?? undefined);
+      await syncWpCategories(prisma, tenant.id, site.id, wp, notion, databaseId);
     } catch (e) {
-      log.warn({ tenantId: tenant.id, err: e }, "Failed to sync WP categories");
+      log.warn({ tenantId: tenant.id, siteId: site.id, err: e }, "Failed to sync WP categories");
     }
   }
 
   // ── 1. "Post to Wordpress" → sync only (creates WP draft, waits for Publish) ──
   const syncPages = await notion.getReadyPosts(
-    tenant.notionDatabaseId,
+    databaseId,
     tenant.notionTriggerStatus,
     5,
   );
@@ -38,7 +65,7 @@ export async function pollTenant(boss: PgBoss, prisma: PrismaClient, tenant: Ten
 
     // "Post to Wordpress" is for new posts — if already synced, check WP post still exists
     const existingPost = await prisma.post.findUnique({
-      where: { tenantId_notionPageId: { tenantId: tenant.id, notionPageId: pageId } },
+      where: { siteId_notionPageId: { siteId: site.id, notionPageId: pageId } },
       select: { id: true, wpPostId: true, wpFeaturedMediaId: true, status: true },
     });
     if (existingPost?.wpPostId) {
@@ -54,13 +81,13 @@ export async function pollTenant(boss: PgBoss, prisma: PrismaClient, tenant: Ten
         }
       }
       if (wpPostAlive) {
-        log.warn({ tenantId: tenant.id, pageId, wpPostId: existingPost.wpPostId }, "Post already synced to WP — use 'Update Wordpress' instead, resetting Notion status");
+        log.warn({ tenantId: tenant.id, siteId: site.id, pageId, wpPostId: existingPost.wpPostId }, "Post already synced to WP — use 'Update Wordpress' instead, resetting Notion status");
         const resetStatus = existingPost.status === "PUBLISHED" ? "Published" : "Ready to Review";
         await notion.updatePageStatus(pageId, resetStatus);
         continue;
       }
       // WP post was deleted — clean up old featured media and clear stale data
-      log.info({ tenantId: tenant.id, pageId, wpPostId: existingPost.wpPostId }, "WP post deleted, clearing stale data for re-sync");
+      log.info({ tenantId: tenant.id, siteId: site.id, pageId, wpPostId: existingPost.wpPostId }, "WP post deleted, clearing stale data for re-sync");
       if (existingPost.wpFeaturedMediaId && wpCreds) {
         const wp = new WordPressService(wpCreds);
         wp.deleteMedia(existingPost.wpFeaturedMediaId).catch((e) => log.warn({ err: e }, "Failed to delete old featured media"));
@@ -76,65 +103,63 @@ export async function pollTenant(boss: PgBoss, prisma: PrismaClient, tenant: Ten
       where: { tenantId: tenant.id, type: "SYNC_POST", status: "RUNNING", payload: { path: ["notionPageId"], equals: pageId } },
     });
     if (runningJob) {
-      log.debug({ tenantId: tenant.id, pageId }, "Sync already running, skipping");
+      log.debug({ tenantId: tenant.id, siteId: site.id, pageId }, "Sync already running, skipping");
       continue;
     }
 
-    log.info({ tenantId: tenant.id, pageId }, "Found post to sync, enqueuing sync-post");
+    log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Found post to sync, enqueuing sync-post");
     await boss.send(
       "sync-post",
-      { tenantId: tenant.id, notionPageId: pageId },
-      { singletonKey: `sync:${pageId}` },
+      { tenantId: tenant.id, siteId: site.id, notionPageId: pageId },
+      { singletonKey: `sync:${site.id}:${pageId}` },
     );
   }
 
   // ── 2. "Publish" → always re-sync from Notion then publish ──
   const publishPages = await notion.getReadyPosts(
-    tenant.notionDatabaseId,
+    databaseId,
     tenant.notionPublishTriggerStatus,
     5,
   );
   for (const page of publishPages) {
     const pageId = (page as { id: string }).id;
-
     const runningPublishJob = await prisma.job.findFirst({
       where: { tenantId: tenant.id, type: "SYNC_POST", status: "RUNNING", payload: { path: ["notionPageId"], equals: pageId } },
     });
     if (runningPublishJob) {
-      log.debug({ tenantId: tenant.id, pageId }, "Sync already running, skipping publish");
+      log.debug({ tenantId: tenant.id, siteId: site.id, pageId }, "Sync already running, skipping publish");
       continue;
     }
 
-    log.info({ tenantId: tenant.id, pageId }, "Found post to publish, enqueuing sync-then-publish");
+    log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Found post to publish, enqueuing sync-then-publish");
     await boss.send(
       "sync-post",
-      { tenantId: tenant.id, notionPageId: pageId, thenPublish: true, forcePublish: true },
-      { singletonKey: `sync:${pageId}` },
+      { tenantId: tenant.id, siteId: site.id, notionPageId: pageId, thenPublish: true, forcePublish: true },
+      { singletonKey: `sync:${site.id}:${pageId}` },
     );
   }
 
   // ── 3. "Update Wordpress" → re-sync content then auto-publish ──
   const updatePages = await notion.getReadyPosts(
-    tenant.notionDatabaseId,
+    databaseId,
     tenant.notionUpdateTriggerStatus,
     5,
   );
   for (const page of updatePages) {
     const pageId = (page as { id: string }).id;
-
     const runningUpdateJob = await prisma.job.findFirst({
       where: { tenantId: tenant.id, type: "SYNC_POST", status: "RUNNING", payload: { path: ["notionPageId"], equals: pageId } },
     });
     if (runningUpdateJob) {
-      log.debug({ tenantId: tenant.id, pageId }, "Sync already running, skipping update");
+      log.debug({ tenantId: tenant.id, siteId: site.id, pageId }, "Sync already running, skipping update");
       continue;
     }
 
-    log.info({ tenantId: tenant.id, pageId }, "Found post to update, enqueuing sync-post (with publish)");
+    log.info({ tenantId: tenant.id, siteId: site.id, pageId }, "Found post to update, enqueuing sync-post (with publish)");
     await boss.send(
       "sync-post",
-      { tenantId: tenant.id, notionPageId: pageId, thenPublish: true },
-      { singletonKey: `sync:${pageId}` },
+      { tenantId: tenant.id, siteId: site.id, notionPageId: pageId, thenPublish: true },
+      { singletonKey: `sync:${site.id}:${pageId}` },
     );
   }
 }

@@ -50,6 +50,12 @@ See **[notipo.com/ai-agents](https://notipo.com/ai-agents)** for the full AI-age
 
 ---
 
+## Multiple blogs (one account, many sites)
+
+One blog = one copy of the Notipo Notion template = one WordPress site. Duplicate the template as a top-level teamspace page, share the copy with the Notipo connection, and connect it in **Settings → Blogs** (or `POST /api/sites`). Notipo generates the site key, finds the posts database inside the copy, and writes a reserved first row named **Configuration** (key, last sync) into it — lock it from the UI once you are set up. Events route by which copy's database they came from, and posts, categories, tags and image mappings are scoped per site, so each post keeps its single status and WordPress post ID.
+
+A tenant can hold any number of WordPress application passwords, each paired with its blog URL. Posts created through the API accept an optional `siteId` and otherwise target the first-connected site.
+
 ## Hosted SaaS vs. self-hosting
 
 The **hosted version at [notipo.com](https://notipo.com)** is the supported, batteries-included product — managed infrastructure, automatic upgrades, instant Notion webhook delivery, and a free tier with 5 posts/month. Pro is $19/month for unlimited posts plus AI featured images.

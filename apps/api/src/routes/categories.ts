@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { CredentialService } from "../services/credential.service.js";
+import { SiteService } from "../services/site.service.js";
 import { WordPressService } from "../services/wordpress.service.js";
 import { NotionService } from "../services/notion.service.js";
 import { syncWpCategories } from "../lib/sync-wp-categories.js";
@@ -14,7 +15,7 @@ const ALLOWED_MIME_TYPES: Record<string, string> = {
 };
 
 /**
- * Remove a background image from the tenant's WordPress media library.
+ * Remove a background image from the site's WordPress media library.
  *
  * Best effort on purpose. The file lives on the customer's own site, so a
  * failure here means one orphaned image in their library — not a reason to
@@ -22,16 +23,16 @@ const ALLOWED_MIME_TYPES: Record<string, string> = {
  */
 async function deleteBackgroundMedia(
   prisma: PrismaClient,
-  tenantId: string,
+  siteId: string,
   mediaId: number | null,
 ) {
   if (!mediaId) return;
   try {
-    const creds = await new CredentialService(prisma).getWordPressCredentials(tenantId);
+    const creds = await new SiteService(prisma).getWordPressCredentials(siteId);
     if (!creds) return;
     await new WordPressService(creds).deleteMedia(mediaId);
   } catch (err) {
-    logger.warn({ err, tenantId, mediaId }, "Could not remove background image from WordPress");
+    logger.warn({ err, siteId, mediaId }, "Could not remove background image from WordPress");
   }
 }
 
@@ -56,38 +57,63 @@ const updateCategorySchema = z.object({
   backgroundImage: z.string().min(1).nullable(),
 });
 
+const syncCategoriesSchema = z.object({
+  siteId: z.string().optional(),
+});
+
 export async function categoryRoutes(app: FastifyInstance) {
+  // Taxonomy is per-site; fall back to the tenant's default site
+  async function resolveSite(tenantId: string, siteId?: string) {
+    const siteService = new SiteService(app.prisma);
+    return siteId
+      ? siteService.getSiteForTenant(tenantId, siteId)
+      : siteService.getDefaultSite(tenantId);
+  }
+
   app.get("/api/categories", async (request) => {
-    const categories = await app.prisma.category.findMany({
-      where: { tenantId: request.tenant.id },
-      orderBy: { name: "asc" },
-    });
+    const query = request.query as { siteId?: string };
+    const site = await resolveSite(request.tenant.id, query.siteId);
+    const categories = site
+      ? await app.prisma.category.findMany({
+          where: { tenantId: request.tenant.id, siteId: site.id },
+          orderBy: { name: "asc" },
+        })
+      : [];
     return { data: withPreviewUrls(categories) };
   });
 
   app.get("/api/tags", async (request) => {
-    const tags = await app.prisma.tag.findMany({
-      where: { tenantId: request.tenant.id },
-      orderBy: { name: "asc" },
-    });
+    const query = request.query as { siteId?: string };
+    const site = await resolveSite(request.tenant.id, query.siteId);
+    const tags = site
+      ? await app.prisma.tag.findMany({
+          where: { tenantId: request.tenant.id, siteId: site.id },
+          orderBy: { name: "asc" },
+        })
+      : [];
     return { data: tags };
   });
 
-  /** Sync categories and tags from the tenant's WordPress site into the DB. */
+  /** Sync categories and tags from a site's WordPress install into the DB. */
   app.post("/api/categories/sync", async (request, reply) => {
-    const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(request.tenant.id);
-    if (!wpCreds) return reply.badRequest("WordPress credentials not configured");
+    const body = syncCategoriesSchema.parse(request.body ?? {});
+    const site = await resolveSite(request.tenant.id, body.siteId);
+    if (!site) return reply.badRequest("No site connected");
+
+    const siteService = new SiteService(app.prisma);
+    const wpCreds = await siteService.getWordPressCredentials(site.id);
+    if (!wpCreds) return reply.badRequest("WordPress credentials not configured for this site");
 
     const wp = new WordPressService(wpCreds);
-    const notionCreds = await credService.getNotionCredentials(request.tenant.id);
-    const tenant = await app.prisma.tenant.findUniqueOrThrow({ where: { id: request.tenant.id }, select: { notionDatabaseId: true } });
+    const notionCreds = await new CredentialService(app.prisma).getNotionCredentials(request.tenant.id);
     const notion = notionCreds ? new NotionService(notionCreds.accessToken) : undefined;
-    const synced = await syncWpCategories(app.prisma, request.tenant.id, wp, notion, tenant.notionDatabaseId ?? undefined);
+    const synced = await syncWpCategories(
+      app.prisma, request.tenant.id, site.id, wp, notion, site.notionDatabaseId ?? undefined,
+    );
 
     const [categories, tags] = await Promise.all([
-      app.prisma.category.findMany({ where: { tenantId: request.tenant.id }, orderBy: { name: "asc" } }),
-      app.prisma.tag.findMany({ where: { tenantId: request.tenant.id }, orderBy: { name: "asc" } }),
+      app.prisma.category.findMany({ where: { tenantId: request.tenant.id, siteId: site.id }, orderBy: { name: "asc" } }),
+      app.prisma.tag.findMany({ where: { tenantId: request.tenant.id, siteId: site.id }, orderBy: { name: "asc" } }),
     ]);
     return { data: { categories: withPreviewUrls(categories), tags }, synced };
   });
@@ -137,11 +163,11 @@ export async function categoryRoutes(app: FastifyInstance) {
       return reply.badRequest("File too large. Maximum size is 5 MB.");
     }
 
-    const creds = await new CredentialService(app.prisma).getWordPressCredentials(tenantId);
+    const creds = await new SiteService(app.prisma).getWordPressCredentials(category.siteId);
     if (!creds) {
       return reply
         .code(400)
-        .send({ error: "WordPress is not connected. Connect WordPress in Settings first." });
+        .send({ error: "WordPress is not connected for this site. Connect the site first." });
     }
 
     // Named after the category rather than its id: this lands in the customer's
@@ -163,7 +189,7 @@ export async function categoryRoutes(app: FastifyInstance) {
     }
 
     // Replacing: take the previous one out of their library so it does not pile up.
-    await deleteBackgroundMedia(app.prisma, tenantId, category.backgroundImageMediaId);
+    await deleteBackgroundMedia(app.prisma, category.siteId, category.backgroundImageMediaId);
 
     const updated = await app.prisma.category.update({
       where: { id: categoryId },
@@ -183,7 +209,7 @@ export async function categoryRoutes(app: FastifyInstance) {
     });
     if (!category) return reply.notFound("Category not found");
 
-    await deleteBackgroundMedia(app.prisma, tenantId, category.backgroundImageMediaId);
+    await deleteBackgroundMedia(app.prisma, category.siteId, category.backgroundImageMediaId);
 
     const updated = await app.prisma.category.update({
       where: { id: categoryId },
@@ -207,7 +233,7 @@ export async function categoryRoutes(app: FastifyInstance) {
     }
 
     // Take the background out of their media library before dropping the row.
-    await deleteBackgroundMedia(app.prisma, request.tenant.id, category.backgroundImageMediaId);
+    await deleteBackgroundMedia(app.prisma, category.siteId, category.backgroundImageMediaId);
 
     await app.prisma.category.delete({ where: { id: request.params.id } });
     return reply.code(204).send();

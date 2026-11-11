@@ -9,12 +9,14 @@ import { convertNotionBlocksToMarkdown } from "./notion-to-markdown.js";
 import { ImagePipelineService } from "./image-pipeline.service.js";
 import { WordPressService } from "./wordpress.service.js";
 import { CredentialService } from "./credential.service.js";
+import { SiteService } from "./site.service.js";
 import { convertMarkdownToGutenberg } from "./markdown-to-gutenberg.js";
 import { FeaturedImageService } from "./featured-image.service.js";
 import { canGenerateFeaturedImage } from "../lib/plan-limits.js";
 import { extractImageRefs } from "../lib/extract-images.js";
 import { resolveAiImageProvider } from "../lib/ai-image-provider.js";
 import { buildStockAttributionBlock } from "../lib/stock-attribution.js";
+import { isConfigurationRow } from "../lib/site-config.js";
 import { logger } from "../lib/logger.js";
 
 export interface DirectPublishInput {
@@ -37,20 +39,24 @@ export class SyncService {
   constructor(private prisma: PrismaClient) {}
 
   /** Sync a single Notion page to the database. Returns the post ID, WP status, and whether the post was previously published. */
-  async syncPost(tenantId: string, notionPageId: string, onStep?: (step: string) => void, wpSlug?: string): Promise<{ postId: string; wpStatus: string | null; wasPublished: boolean }> {
+  async syncPost(tenantId: string, siteId: string, notionPageId: string, onStep?: (step: string) => void, wpSlug?: string): Promise<{ postId: string; wpStatus: string | null; wasPublished: boolean }> {
     const credService = new CredentialService(this.prisma);
+    const siteService = new SiteService(this.prisma);
 
-    // Get tenant credentials
+    // Notion credentials are workspace-level; WordPress is per-site
     const notionCreds = await credService.getNotionCredentials(tenantId);
     if (!notionCreds) throw new Error("Notion credentials not configured");
 
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) throw new Error("WordPress credentials not configured");
+    const site = await siteService.getById(siteId);
+    if (!site || site.tenantId !== tenantId) throw new Error("Site not found");
+
+    const wpCreds = await siteService.getWordPressCredentials(siteId);
+    if (!wpCreds) throw new Error("WordPress is not connected for this site");
 
     const notion = new NotionService(notionCreds.accessToken);
     const wp = new WordPressService(wpCreds);
 
-    logger.info({ tenantId, notionPageId }, "Syncing post from Notion");
+    logger.info({ tenantId, siteId, notionPageId }, "Syncing post from Notion");
 
     // 0. Update Notion status so the user sees immediate feedback
     await notion.updatePageStatus(notionPageId, "Syncing");
@@ -59,6 +65,11 @@ export class SyncService {
     onStep?.("Fetching from Notion…");
     const page = await notion.getPageProperties(notionPageId);
     const blocks = await notion.getPageBlocks(notionPageId);
+
+    // Never treat the reserved Configuration row as a post
+    if (isConfigurationRow(page)) {
+      throw new Error("Refusing to sync the Configuration row");
+    }
 
     // Extract last_edited_time for change detection on future re-syncs
     const pageObj = page as Record<string, unknown>;
@@ -84,7 +95,7 @@ export class SyncService {
     // 3. Resolve category
     const category = result.metadata.category
       ? await this.prisma.category.findUnique({
-          where: { tenantId_name: { tenantId, name: result.metadata.category } },
+          where: { siteId_name: { siteId, name: result.metadata.category } },
         })
       : null;
 
@@ -92,7 +103,7 @@ export class SyncService {
 
     // Determine final status: re-syncing a published post → UPDATE_PENDING
     const existing = await this.prisma.post.findUnique({
-      where: { tenantId_notionPageId: { tenantId, notionPageId } },
+      where: { siteId_notionPageId: { siteId, notionPageId } },
       select: { wpPostId: true, wpFeaturedMediaId: true, status: true },
     });
     const isUpdate = existing?.wpPostId != null;
@@ -111,6 +122,7 @@ export class SyncService {
       // Upsert post first (need ID for image mapping) and mark as processing
       const post = await this.upsertPost(
         tenantId,
+        siteId,
         notionPageId,
         result,
         category?.id,
@@ -121,6 +133,7 @@ export class SyncService {
 
       const imageResult = await pipeline.processImages(
         tenantId,
+        siteId,
         post.id,
         result.images,
         result.markdown,
@@ -143,6 +156,7 @@ export class SyncService {
     } else {
       const post = await this.upsertPost(
         tenantId,
+        siteId,
         notionPageId,
         result,
         category?.id,
@@ -156,7 +170,7 @@ export class SyncService {
     onStep?.(isUpdate ? "Updating WP post…" : "Creating WP draft…");
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { codeHighlighter: true, plan: true, trialEndsAt: true, wpSeoPlugin: true, featuredImageMode: true, aiImageStyle: true },
+      select: { codeHighlighter: true, plan: true, trialEndsAt: true, featuredImageMode: true, aiImageStyle: true },
     });
     const highlighter = tenant!.codeHighlighter;
     const featuredImagesAllowed = canGenerateFeaturedImage(tenant!.plan, tenant!.trialEndsAt);
@@ -168,7 +182,7 @@ export class SyncService {
     let wpStatus: string | null = null;
     let wpUrl: string | undefined;
     if (isUpdate) {
-      const wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: tenant!.wpSeoPlugin });
+      const wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: site.wpSeoPlugin });
       let wpPostGone = false;
       try {
         // Fetch current WP status before editing. Use our DB as source of truth:
@@ -201,7 +215,7 @@ export class SyncService {
             keyword: result.metadata.seoKeyword,
             title: result.metadata.title,
             description: seoDescription,
-          }, tenant!.wpSeoPlugin);
+          }, site.wpSeoPlugin);
           await this.prisma.post.update({
             where: { id: postId },
             data: { seoDescription },
@@ -235,7 +249,7 @@ export class SyncService {
           const pipeline = new ImagePipelineService(this.prisma, wp);
           const imgSlug = result.metadata.slug || result.metadata.title;
           const reimageResult = await pipeline.processImages(
-            tenantId, postId, result.images, result.markdown, imgSlug,
+            tenantId, siteId, postId, result.images, result.markdown, imgSlug,
           );
           finalMarkdown = reimageResult.processedContent;
           await this.prisma.post.update({
@@ -250,7 +264,7 @@ export class SyncService {
       // Guard: re-check DB for existing wpPostId to prevent duplicate WP drafts.
       // A concurrent job or prior sync may have already created one.
       const freshPost = await this.prisma.post.findUnique({
-        where: { tenantId_notionPageId: { tenantId, notionPageId } },
+        where: { siteId_notionPageId: { siteId, notionPageId } },
         select: { wpPostId: true },
       });
       if (freshPost?.wpPostId) {
@@ -262,7 +276,7 @@ export class SyncService {
       }
 
       // Re-convert markdown → Gutenberg using the (possibly refreshed) finalMarkdown
-      let wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: tenant!.wpSeoPlugin });
+      let wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: site.wpSeoPlugin });
 
       // Resolve tag IDs (post tags take priority over category defaults)
       // Best-effort: some WP sites have /tags endpoint disabled (404)
@@ -340,7 +354,7 @@ export class SyncService {
           keyword: result.metadata.seoKeyword,
           title: result.metadata.title,
           description: seoDescription,
-        }, tenant!.wpSeoPlugin);
+        }, site.wpSeoPlugin);
         await this.prisma.post.update({
           where: { id: postId },
           data: { seoDescription },
@@ -363,14 +377,16 @@ export class SyncService {
   }
 
   /** Direct publish: markdown → WordPress, skipping Notion entirely. */
-  async syncDirect(tenantId: string, input: DirectPublishInput, onStep?: (step: string) => void, existingPostId?: string): Promise<{ postId: string }> {
-    const credService = new CredentialService(this.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) throw new Error("WordPress credentials not configured");
+  async syncDirect(tenantId: string, siteId: string, input: DirectPublishInput, onStep?: (step: string) => void, existingPostId?: string): Promise<{ postId: string }> {
+    const siteService = new SiteService(this.prisma);
+    const site = await siteService.getById(siteId);
+    if (!site || site.tenantId !== tenantId) throw new Error("Site not found");
+    const wpCreds = await siteService.getWordPressCredentials(siteId);
+    if (!wpCreds) throw new Error("WordPress is not connected for this site");
 
     const wp = new WordPressService(wpCreds);
 
-    logger.info({ tenantId, title: input.title }, "Direct publish starting");
+    logger.info({ tenantId, siteId, title: input.title }, "Direct publish starting");
 
     // Derive slug
     const slug = input.slug
@@ -380,7 +396,7 @@ export class SyncService {
     // Resolve category
     const category = input.category
       ? await this.prisma.category.findUnique({
-          where: { tenantId_name: { tenantId, name: input.category } },
+          where: { siteId_name: { siteId, name: input.category } },
         })
       : null;
 
@@ -391,6 +407,7 @@ export class SyncService {
     const tags = input.tags ?? [];
     const postData = {
       tenantId,
+      siteId,
       title: input.title,
       slug,
       markdownContent: input.markdown,
@@ -424,7 +441,7 @@ export class SyncService {
       onStep?.(`Processing ${images.length} image${images.length === 1 ? "" : "s"}…`);
       const pipeline = new ImagePipelineService(this.prisma, wp);
       const imageResult = await pipeline.processImages(
-        tenantId, postId, images, input.markdown, slug || input.title,
+        tenantId, siteId, postId, images, input.markdown, slug || input.title,
       );
       finalMarkdown = imageResult.processedContent;
       await this.prisma.post.update({
@@ -436,14 +453,14 @@ export class SyncService {
     // Tenant settings
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { codeHighlighter: true, plan: true, trialEndsAt: true, wpSeoPlugin: true, featuredImageMode: true, aiImageStyle: true },
+      select: { codeHighlighter: true, plan: true, trialEndsAt: true, featuredImageMode: true, aiImageStyle: true },
     });
     const highlighter = tenant!.codeHighlighter;
     const featuredImagesAllowed = canGenerateFeaturedImage(tenant!.plan, tenant!.trialEndsAt);
 
     // Convert markdown to Gutenberg
     onStep?.("Creating WP draft…");
-    let wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: tenant!.wpSeoPlugin });
+    let wpContent = convertMarkdownToGutenberg(finalMarkdown, { highlighter, seoPlugin: site.wpSeoPlugin });
 
     // Resolve tag IDs
     let tagIds: number[] = [];
@@ -530,7 +547,7 @@ export class SyncService {
         keyword: input.seoKeyword,
         title: input.title,
         description: seoDescription,
-      }, tenant!.wpSeoPlugin);
+      }, site.wpSeoPlugin);
       await this.prisma.post.update({
         where: { id: postId },
         data: { seoDescription },
@@ -563,6 +580,7 @@ export class SyncService {
 
   private async upsertPost(
     tenantId: string,
+    siteId: string,
     notionPageId: string,
     result: ReturnType<typeof convertNotionBlocksToMarkdown>,
     categoryId?: string | null,
@@ -571,7 +589,7 @@ export class SyncService {
   ) {
     const tags = result.metadata.tags ?? [];
     return this.prisma.post.upsert({
-      where: { tenantId_notionPageId: { tenantId, notionPageId } },
+      where: { siteId_notionPageId: { siteId, notionPageId } },
       update: {
         title: result.metadata.title,
         slug: result.metadata.slug,
@@ -586,6 +604,7 @@ export class SyncService {
       },
       create: {
         tenantId,
+        siteId,
         notionPageId,
         title: result.metadata.title,
         slug: result.metadata.slug,

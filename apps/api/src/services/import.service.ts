@@ -5,6 +5,7 @@
 
 import type { PrismaClient } from "@prisma/client";
 import { CredentialService } from "./credential.service.js";
+import { SiteService } from "./site.service.js";
 import { WordPressService } from "./wordpress.service.js";
 import { NotionService } from "./notion.service.js";
 import { convertGutenbergToMarkdown } from "./gutenberg-to-markdown.js";
@@ -22,6 +23,7 @@ export class ImportService {
 
   async importPost(
     tenantId: string,
+    siteId: string,
     wpPostId: number,
     overwrite: boolean,
     onStep?: (step: string) => void,
@@ -30,7 +32,7 @@ export class ImportService {
   ): Promise<ImportResult> {
     // 1. Check for existing import
     const existing = await this.prisma.post.findFirst({
-      where: { tenantId, wpPostId },
+      where: { siteId, wpPostId },
     });
 
     if (existing && !overwrite) {
@@ -42,18 +44,17 @@ export class ImportService {
       };
     }
 
-    // 2. Get credentials
+    // 2. Get credentials — Notion is workspace-level, WordPress per-site
     const credService = new CredentialService(this.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
+    const siteService = new SiteService(this.prisma);
+    const wpCreds = await siteService.getWordPressCredentials(siteId);
     if (!wpCreds) throw new Error("WordPress not connected");
     const notionCreds = await credService.getNotionCredentials(tenantId);
     if (!notionCreds) throw new Error("Notion not connected");
 
-    const tenant = await this.prisma.tenant.findUniqueOrThrow({
-      where: { id: tenantId },
-      select: { notionDatabaseId: true, wpSeoPlugin: true },
-    });
-    if (!tenant.notionDatabaseId) throw new Error("Notion database not configured");
+    const site = await siteService.getById(siteId);
+    if (!site || site.tenantId !== tenantId) throw new Error("Site not found");
+    if (!site.notionDatabaseId) throw new Error("Notion database not configured for this site");
 
     const wp = new WordPressService(wpCreds);
     const notion = new NotionService(notionCreds.accessToken);
@@ -125,7 +126,7 @@ export class ImportService {
     if (categoryName || tagNames.length) {
       onStep?.("Syncing Notion database options…");
       await notion.syncDatabaseOptions(
-        tenant.notionDatabaseId,
+        site.notionDatabaseId,
         categoryName ? [categoryName] : [],
         tagNames,
       );
@@ -143,7 +144,7 @@ export class ImportService {
       } catch {
         // Page may already be deleted
       }
-      notionPageId = await notion.createPage(tenant.notionDatabaseId, {
+      notionPageId = await notion.createPage(site.notionDatabaseId, {
         title,
         status: notionStatus,
         category: categoryName,
@@ -153,7 +154,7 @@ export class ImportService {
       });
     } else {
       onStep?.("Creating Notion page…");
-      notionPageId = await notion.createPage(tenant.notionDatabaseId, {
+      notionPageId = await notion.createPage(site.notionDatabaseId, {
         title,
         status: notionStatus,
         category: categoryName,
@@ -180,7 +181,7 @@ export class ImportService {
     let categoryId: string | undefined;
     if (categoryName) {
       const cat = await this.prisma.category.findUnique({
-        where: { tenantId_name: { tenantId, name: categoryName } },
+        where: { siteId_name: { siteId, name: categoryName } },
       });
       categoryId = cat?.id;
     }
@@ -214,6 +215,7 @@ export class ImportService {
       post = await this.prisma.post.create({
         data: {
           tenantId,
+          siteId,
           wpPostId,
           ...postData,
         },

@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 Each `## vX.Y.Z` section is extracted verbatim by `.github/workflows/release.yml` and posted as the GitHub release notes when the matching tag is pushed.
 
+## Unreleased
+
+### Multiple WordPress sites per account
+
+One blog = one copy of the Notipo Notion template (a top-level teamspace page) = one WordPress site. The new `Site` model stores each copy's posts database, blog URL, and its own WordPress application password; posts, categories, tags and image mappings are scoped by site, so every post keeps its single status and WP post ID. Connecting a blog (Settings → Blogs, or `POST /api/sites`) generates the site key, writes the reserved `Configuration` row (key, last sync) into the copy, and can lock it after setup — that row is never synced as a post. Webhook and poll events route by which copy's database they came from. Existing single-site installs migrate automatically: the current WordPress connection becomes the tenant's first site. Trigger statuses remain account-wide.
+
 ## v1.5.0
 
 Mostly a security release. If you are running an older tag, this is the one to take.

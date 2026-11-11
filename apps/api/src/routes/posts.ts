@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { WordPressService } from "../services/wordpress.service.js";
 import { CredentialService } from "../services/credential.service.js";
+import { SiteService } from "../services/site.service.js";
 import { NotionService } from "../services/notion.service.js";
 import { searchStockImage } from "../services/stock-image-providers/index.js";
 import { logger } from "../lib/logger.js";
@@ -10,6 +11,7 @@ import { captureServer } from "../lib/posthog-server.js";
 
 const syncBodySchema = z.object({
   notionPageId: z.string().min(1),
+  siteId: z.string().optional(),
 });
 
 const imageSchema = z.object({
@@ -19,6 +21,7 @@ const imageSchema = z.object({
 
 const createPostSchema = z.object({
   title: z.string().min(1),
+  siteId: z.string().optional(),
   body: z.string().optional(),
   category: z.string().optional(),
   tags: z.array(z.string()).optional(),
@@ -53,6 +56,7 @@ const updatePostSchema = z.object({
 
 const directPublishSchema = z.object({
   title: z.string().min(1),
+  siteId: z.string().optional(),
   body: z.string().min(1),
   category: z.string().optional(),
   tags: z.array(z.string()).optional(),
@@ -114,6 +118,7 @@ export async function postRoutes(app: FastifyInstance) {
 
       const jobId = await app.boss.send("direct-publish", {
         tenantId,
+        siteId: post.siteId,
         title: body.title ?? post.title,
         markdown,
         category: body.category,
@@ -160,6 +165,7 @@ export async function postRoutes(app: FastifyInstance) {
     // Trigger re-sync to WordPress
     const jobId = await app.boss.send("sync-post", {
       tenantId,
+      siteId: post.siteId,
       notionPageId: post.notionPageId,
       ...(body.publish && { thenPublish: true, forcePublish: true }),
       ...(body.slug && { wpSlug: body.slug }),
@@ -179,11 +185,18 @@ export async function postRoutes(app: FastifyInstance) {
     const notionCreds = await credService.getNotionCredentials(tenantId);
     if (!notionCreds) return reply.code(400).send({ error: "Notion is not configured" });
 
+    const siteService = new SiteService(app.prisma);
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : await siteService.getDefaultSite(tenantId);
+    if (!site?.notionDatabaseId) {
+      return reply.code(400).send({ error: "No site with a Notion template copy is connected. Connect a site first." });
+    }
+
     const tenant = await app.prisma.tenant.findUniqueOrThrow({
       where: { id: tenantId },
-      select: { notionDatabaseId: true, notionTriggerStatus: true, notionPublishTriggerStatus: true },
+      select: { notionTriggerStatus: true, notionPublishTriggerStatus: true },
     });
-    if (!tenant.notionDatabaseId) return reply.code(400).send({ error: "Notion database not configured" });
 
     const notion = new NotionService(notionCreds.accessToken);
     const status = body.publish
@@ -219,7 +232,7 @@ export async function postRoutes(app: FastifyInstance) {
       }
     }
 
-    const notionPageId = await notion.createPage(tenant.notionDatabaseId, {
+    const notionPageId = await notion.createPage(site.notionDatabaseId, {
       title: body.title,
       body: enrichedBody,
       category: body.category,
@@ -232,6 +245,7 @@ export async function postRoutes(app: FastifyInstance) {
 
     const jobId = await app.boss.send("sync-post", {
       tenantId,
+      siteId: site.id,
       notionPageId,
       ...(body.publish && { thenPublish: true, forcePublish: true }),
       ...(body.slug && { wpSlug: body.slug }),
@@ -248,14 +262,18 @@ export async function postRoutes(app: FastifyInstance) {
     const tenantId = request.tenant.id;
 
     // Only WordPress credentials are required — Notion is optional
-    const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
-    if (!wpCreds) {
-      return reply.code(400).send({ error: "WordPress is not connected. Connect WordPress in Settings first." });
+    const siteService = new SiteService(app.prisma);
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : await siteService.getDefaultSite(tenantId);
+    const wpCreds = site ? await siteService.getWordPressCredentials(site.id) : null;
+    if (!site || !wpCreds) {
+      return reply.code(400).send({ error: "WordPress is not connected for this site. Connect a site first." });
     }
 
     const jobId = await app.boss.send("direct-publish", {
       tenantId,
+      siteId: site.id,
       title: body.title,
       markdown: body.body,
       category: body.category,
@@ -284,9 +302,23 @@ export async function postRoutes(app: FastifyInstance) {
     const body = syncBodySchema.parse(request.body);
     const tenantId = request.tenant.id;
 
+    // Route by the site the page belongs to (its copy's database)
+    const siteService = new SiteService(app.prisma);
+    const existing = await app.prisma.post.findFirst({
+      where: { tenantId, notionPageId: body.notionPageId },
+      select: { siteId: true },
+    });
+    const site = body.siteId
+      ? await siteService.getSiteForTenant(tenantId, body.siteId)
+      : existing
+        ? await siteService.getSiteForTenant(tenantId, existing.siteId)
+        : await siteService.getDefaultSite(tenantId);
+    if (!site) return reply.code(400).send({ error: "No site found for this page" });
+
     // Enqueue sync job
     const jobId = await app.boss.send("sync-post", {
       tenantId,
+      siteId: site.id,
       notionPageId: body.notionPageId,
     });
 
@@ -330,7 +362,8 @@ export async function postRoutes(app: FastifyInstance) {
     if (!post) return reply.notFound("Post not found");
 
     const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
+    const siteService = new SiteService(app.prisma);
+    const wpCreds = await siteService.getWordPressCredentials(post.siteId);
 
     // Clean up WordPress resources (best-effort)
     if (wpCreds) {
@@ -391,6 +424,7 @@ export async function postRoutes(app: FastifyInstance) {
     const duplicate = await app.prisma.post.create({
       data: {
         tenantId,
+        siteId: post.siteId,
         title: `${post.title} (copy)`,
         slug: post.slug ? `${post.slug}-copy` : null,
         markdownContent: post.markdownContent,
@@ -420,10 +454,10 @@ export async function postRoutes(app: FastifyInstance) {
       include: { imageMappings: true },
     });
 
-    const credService = new CredentialService(app.prisma);
-    const wpCreds = await credService.getWordPressCredentials(tenantId);
+    const siteService = new SiteService(app.prisma);
 
     for (const post of posts) {
+      const wpCreds = await siteService.getWordPressCredentials(post.siteId);
       if (wpCreds) {
         const wp = new WordPressService(wpCreds);
         if (post.wpPostId) wp.deletePost(post.wpPostId).catch(() => {});
