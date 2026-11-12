@@ -29,6 +29,7 @@ const createSiteSchema = z.object({
   wpSiteUrl: z.string().url(),
   username: z.string().min(1),
   appPassword: z.string().min(1),
+  notionAccessToken: z.string().optional(),
 });
 
 const updateCredentialsSchema = z.object({
@@ -76,11 +77,23 @@ export async function siteRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "Could not connect to WordPress. Check your site URL." });
     }
 
-    // The template copy must already be shared with the Notipo connection
+    // The template copy must already be shared with the Notipo connection.
+    // A token pasted right here is accepted so connecting a blog is never
+    // blocked on the global Notion setting.
     const credService = new CredentialService(app.prisma);
-    const notionCreds = await credService.getNotionCredentials(tenantId);
+    let notionCreds = await credService.getNotionCredentials(tenantId);
+    if (!notionCreds && body.notionAccessToken) {
+      const workspaceId = await new NotionService(body.notionAccessToken)
+        .getBotWorkspaceId()
+        .catch(() => undefined);
+      await credService.setNotionCredentials(tenantId, {
+        accessToken: body.notionAccessToken,
+        workspaceId,
+      });
+      notionCreds = await credService.getNotionCredentials(tenantId);
+    }
     if (!notionCreds) {
-      return reply.code(400).send({ error: "Notion is not connected" });
+      return reply.code(400).send({ error: "Notion is not connected. Paste the integration token in the form or add it in Settings." });
     }
 
     // Notipo generates the keypair and writes the config into the copy

@@ -144,9 +144,15 @@ export async function settingsRoutes(app: FastifyInstance) {
     const body = notionSettingsSchema.parse(request.body);
     const credService = new CredentialService(app.prisma);
 
+    // A token is all that's required: resolve the workspace ID (the webhook
+    // routing key) from the token itself when the caller didn't provide one.
+    const workspaceId =
+      body.workspaceId ??
+      (await new NotionService(body.accessToken).getBotWorkspaceId().catch(() => undefined));
+
     await credService.setNotionCredentials(request.tenant.id, {
       accessToken: body.accessToken,
-      workspaceId: body.workspaceId,
+      workspaceId,
     });
 
     await app.prisma.tenant.update({

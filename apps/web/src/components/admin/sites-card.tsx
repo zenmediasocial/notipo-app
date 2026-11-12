@@ -35,6 +35,7 @@ export function SitesCard({
   const [username, setUsername] = useState("");
   const [appPassword, setAppPassword] = useState("");
   const [showManual, setShowManual] = useState(false);
+  const [notionToken, setNotionToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -64,6 +65,7 @@ export function SitesCard({
         name,
         notionRootPageId: parseNotionPageId(rootPage),
         siteUrl: parsed.origin,
+        notionAccessToken: notionToken || undefined,
       }),
     );
     const callbackUrl = `${window.location.origin}/admin/blogs`;
@@ -91,6 +93,7 @@ export function SitesCard({
           wpSiteUrl: siteUrl.replace(/\/+$/, ""),
           username,
           appPassword,
+          notionAccessToken: notionToken || undefined,
         },
       });
       capture("settings_site_connected");
@@ -207,6 +210,10 @@ export function SitesCard({
               <p className="text-xs text-muted-foreground">
                 Duplicate the Notipo template as a top-level teamspace page, share it with the Notipo integration, then paste it here.
               </p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="site-notion">Notion integration token (only needed once, if Notion isn&apos;t connected yet)</Label>
+              <Input id="site-notion" type="password" value={notionToken} onChange={(e) => setNotionToken(e.target.value)} placeholder="ntn_..." />
             </div>
             <div className="space-y-1">
               <Label htmlFor="site-url">WordPress site URL</Label>

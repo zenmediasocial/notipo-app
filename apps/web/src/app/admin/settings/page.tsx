@@ -95,7 +95,6 @@ function NotionCard({
   const { call } = useApiCall();
   const [showManual, setShowManual] = useState(false);
   const [token, setToken] = useState("");
-  const [dbId, setDbId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,11 +110,10 @@ function NotionCard({
     try {
       await call("/api/settings/notion", {
         method: "PUT",
-        body: { accessToken: token, databaseId: dbId || undefined },
+        body: { accessToken: token },
       });
       capture("settings_notion_updated", { method: "manual" });
       setToken("");
-      setDbId("");
       setShowManual(false);
       onUpdate();
     } catch (err) {
@@ -188,13 +186,10 @@ function NotionCard({
                     onChange={(e) => setToken(e.target.value)}
                     required
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label>Database ID</Label>
-                  <Input
-                    value={dbId}
-                    onChange={(e) => setDbId(e.target.value)}
-                  />
+                  <p className="text-xs text-muted-foreground">
+                    One token connects every blog. Each blog&apos;s database is found
+                    inside its template copy — no database ID needed here.
+                  </p>
                 </div>
                 {error && (
                   <p className="text-sm text-destructive">{error}</p>

@@ -30,7 +30,7 @@ function WPAuthHandler({ onUpdate }: { onUpdate: () => void }) {
     if (!userLogin || !password) return;
     setHandled(true);
 
-    let pending: { name?: string; notionRootPageId?: string; siteUrl?: string } = {};
+    let pending: { name?: string; notionRootPageId?: string; siteUrl?: string; notionAccessToken?: string } = {};
     try {
       pending = JSON.parse(sessionStorage.getItem("pendingSiteConnect") ?? "{}");
     } catch { /* fall back to query params */ }
@@ -59,6 +59,7 @@ function WPAuthHandler({ onUpdate }: { onUpdate: () => void }) {
             wpSiteUrl,
             username: userLogin,
             appPassword: password,
+            notionAccessToken: pending.notionAccessToken ?? undefined,
           },
         });
         capture("settings_site_connected", { method: "wp_approval" });

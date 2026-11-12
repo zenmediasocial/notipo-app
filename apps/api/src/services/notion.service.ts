@@ -374,6 +374,16 @@ export class NotionService {
   }
 
   /**
+   * Resolve the workspace ID behind a bot/integration token. Used when the
+   * user provides only a token — the workspace ID is the webhook routing key
+   * and should never be asked for by hand.
+   */
+  async getBotWorkspaceId(): Promise<string | undefined> {
+    const me = await this.client.users.me({});
+    return (me as { bot?: { workspace_id?: string } }).bot?.workspace_id;
+  }
+
+  /**
    * Retrieve a page once and return everything site routing needs: Status,
    * the parent posts-database ID (which copy it lives in), and the raw page
    * for Configuration-row detection.
